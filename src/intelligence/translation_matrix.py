@@ -267,6 +267,9 @@ class TranslationMatrix:
             lambda violations: self._render_skeleton_correction(ep_id, input_arr, violations, result_arr),
         )
 
+        # Fill any entries that are still empty after idx-scatter + screen correction
+        result_arr = self._fill_missing_skeletons(result_arr, segs, ep_id)
+
         return [item.get("text", "") for item in result_arr]
 
     def _render_skeleton_prompt(
@@ -490,8 +493,11 @@ class TranslationMatrix:
         raw: str, expected_count: int, ep_id: str, step: str
     ) -> list[dict]:
         """
-        Parse LLM response as JSON array of {idx, text} dicts.
-        Handles count mismatch by padding with empty strings or truncating.
+        Parse LLM response as a JSON array of {idx, text} dicts.
+
+        Each item is scattered into its correct position using the idx field —
+        gaps caused by LLM merging or skipping entries remain at the right slot
+        rather than bunching up at the end.
         """
         from src.utils.llm_client import extract_json_array
         try:
@@ -503,29 +509,90 @@ class TranslationMatrix:
             )
             return [{"idx": i, "text": ""} for i in range(expected_count)]
 
-        # Normalise: ensure each element is a dict with idx + text
-        normalised = []
+        # Build a positional result array, then scatter each item by idx
+        result = [{"idx": i, "text": ""} for i in range(expected_count)]
+        placed = 0
+        out_of_range = 0
         for i, item in enumerate(arr):
             if isinstance(item, dict):
-                normalised.append({
-                    "idx": int(item.get("idx", i)),
-                    "text": str(item.get("text", "")),
-                })
+                idx = int(item.get("idx", i))
+                text = str(item.get("text", ""))
             else:
-                normalised.append({"idx": i, "text": str(item)})
+                idx = i
+                text = str(item)
+            if 0 <= idx < expected_count:
+                result[idx]["text"] = text
+                placed += 1
+            else:
+                out_of_range += 1
 
-        if len(normalised) != expected_count:
+        n_returned = len(arr)
+        if n_returned != expected_count or out_of_range:
             logger.warning(
-                "[%s][%s] LLM returned %d elements, expected %d — adjusting",
-                ep_id, step, len(normalised), expected_count,
+                "[%s][%s] LLM returned %d elements (expected %d); "
+                "placed=%d  out-of-range=%d",
+                ep_id, step, n_returned, expected_count, placed, out_of_range,
             )
-            if len(normalised) < expected_count:
-                for j in range(len(normalised), expected_count):
-                    normalised.append({"idx": j, "text": ""})
-            else:
-                normalised = normalised[:expected_count]
 
-        return normalised
+        return result
+
+    def _fill_missing_skeletons(
+        self,
+        result_arr: list[dict],
+        segs: list[dict],
+        ep_id: str,
+    ) -> list[dict]:
+        """
+        Targeted retry for skeleton entries that are empty after idx-scatter.
+
+        Sends ONLY the missing (idx, source_zh) pairs back to DeepSeek and
+        patches the result in-place.  Handles the common case where the LLM
+        merged consecutive short lines, leaving gaps at the original positions.
+        """
+        missing = [
+            i for i, item in enumerate(result_arr)
+            if not item.get("text", "").strip() and i < len(segs)
+        ]
+        if not missing:
+            return result_arr
+
+        logger.warning(
+            "[%s][skeleton] %d/%d entries empty after scatter — targeted fill retry",
+            ep_id, len(missing), len(result_arr),
+        )
+
+        retry_input = [
+            {"idx": i, "text": segs[i]["source_zh"]}
+            for i in missing
+        ]
+        system = "You are a professional subtitle translator."
+        user = (
+            f"Episode {ep_id}: Translate these Chinese subtitle segments to English. "
+            f"Each input segment MUST produce exactly ONE output — never merge them. "
+            f"Return ONLY a JSON array of {{\"idx\": <int>, \"text\": \"<translation>\"}} objects.\n\n"
+            f"{json.dumps(retry_input, ensure_ascii=False, indent=2)}"
+        )
+
+        try:
+            from src.utils.llm_client import extract_json_array
+            raw = self.llm_ds.complete(
+                system=system, user=user, module_name="Translation_Fill"
+            )
+            arr = extract_json_array(raw)
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                idx = int(item.get("idx", -1))
+                text = str(item.get("text", "")).strip()
+                if 0 <= idx < len(result_arr) and text:
+                    result_arr[idx]["text"] = text
+        except Exception as exc:
+            logger.warning(
+                "[%s] Skeleton fill retry failed: %s — leaving entries empty",
+                ep_id, exc,
+            )
+
+        return result_arr
 
     # ------------------------------------------------------------------ #
     #  Cache & SRT output                                                   #
