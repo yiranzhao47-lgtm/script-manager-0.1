@@ -64,6 +64,15 @@ class LLMCallError(RuntimeError):
 #  JSON extraction helper (used by both metadata and execution layers)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Matches a trailing comma before a closing } or ] — invalid per JSON spec but
+# common in LLM output (DeepSeek occasionally emits "value",\n  }).
+_RE_TRAILING_COMMA = re.compile(r",\s*([}\]])")
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Remove trailing commas before closing braces/brackets (LLM style error)."""
+    return _RE_TRAILING_COMMA.sub(r"\1", text)
+
 
 def extract_json(text: str) -> dict:
     """
@@ -78,19 +87,27 @@ def extract_json(text: str) -> dict:
     """
     text = text.strip()
 
+    def _try_object(s: str) -> dict | None:
+        for candidate in (s, _strip_trailing_commas(s)):
+            try:
+                result = json.loads(candidate)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+        return None
+
     # ── 1. Direct parse ───────────────────────────────────────────────────
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    result = _try_object(text)
+    if result is not None:
+        return result
 
     # ── 2. Strip markdown fences ──────────────────────────────────────────
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
     if fence:
-        try:
-            return json.loads(fence.group(1).strip())
-        except json.JSONDecodeError:
-            pass
+        result = _try_object(fence.group(1).strip())
+        if result is not None:
+            return result
 
     # ── 3. Locate outermost JSON object by brace matching ─────────────────
     depth = 0
@@ -103,10 +120,10 @@ def extract_json(text: str) -> dict:
         elif ch == "}":
             depth -= 1
             if depth == 0 and start != -1:
-                try:
-                    return json.loads(text[start : i + 1])
-                except json.JSONDecodeError:
-                    start = -1  # keep scanning for next candidate object
+                result = _try_object(text[start : i + 1])
+                if result is not None:
+                    return result
+                start = -1  # keep scanning for next candidate object
 
     raise ValueError(
         f"No valid JSON object found in LLM response.  "
@@ -123,23 +140,27 @@ def extract_json_array(text: str) -> list:
     """
     text = text.strip()
 
+    def _try_array(s: str) -> list | None:
+        for candidate in (s, _strip_trailing_commas(s)):
+            try:
+                result = json.loads(candidate)
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+        return None
+
     # ── 1. Direct parse ───────────────────────────────────────────────────
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-    except json.JSONDecodeError:
-        pass
+    result = _try_array(text)
+    if result is not None:
+        return result
 
     # ── 2. Strip markdown fences ──────────────────────────────────────────
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
     if fence:
-        try:
-            result = json.loads(fence.group(1).strip())
-            if isinstance(result, list):
-                return result
-        except json.JSONDecodeError:
-            pass
+        result = _try_array(fence.group(1).strip())
+        if result is not None:
+            return result
 
     # ── 3. Locate outermost JSON array by bracket matching ────────────────
     depth = 0
@@ -152,12 +173,10 @@ def extract_json_array(text: str) -> list:
         elif ch == "]":
             depth -= 1
             if depth == 0 and start != -1:
-                try:
-                    result = json.loads(text[start : i + 1])
-                    if isinstance(result, list):
-                        return result
-                except json.JSONDecodeError:
-                    start = -1
+                result = _try_array(text[start : i + 1])
+                if result is not None:
+                    return result
+                start = -1
 
     raise ValueError(
         f"No valid JSON array found in LLM response.  "

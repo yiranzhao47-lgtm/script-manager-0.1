@@ -70,6 +70,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
@@ -367,6 +368,59 @@ class OverlapAligner:
     #  same_lang sparse-ASR rescue: OCR as master                         #
     # ------------------------------------------------------------------ #
 
+    def _dedup_rescue_blocks(self, blocks: list[dict], episode_id: str) -> list[dict]:
+        """
+        Merge adjacent same_lang OCR blocks with near-identical text.
+
+        In same_lang mode OCR blocks are never deduped (OCRDedup is cross_lang only).
+        When rescue promotes them to master, boundary-frame OCR misreads (e.g. 干→千)
+        create separate blocks for what is physically one subtitle on screen.
+        This pass merges consecutive blocks that are temporally adjacent
+        (gap ≤ 0.6 s) AND textually similar (SequenceMatcher ≥ 0.80).
+        """
+        if not blocks:
+            return blocks
+
+        _SIM_THRESH = 0.80
+        _GAP_THRESH = 0.6  # seconds; wider than one OCR frame (0.5 s at 2 fps)
+
+        sorted_blocks = sorted(blocks, key=lambda b: b["start"])
+        merged: list[dict] = []
+        active: dict | None = None
+
+        for blk in sorted_blocks:
+            if active is None:
+                active = dict(blk)
+                continue
+
+            gap = blk["start"] - active["end"]
+            if gap <= _GAP_THRESH:
+                sim = SequenceMatcher(
+                    None, active["combined_text"], blk["combined_text"]
+                ).ratio()
+                if sim >= _SIM_THRESH:
+                    # Extend time range; keep higher-confidence text
+                    active["end"] = blk["end"]
+                    if blk["avg_confidence"] > active["avg_confidence"]:
+                        active["combined_text"] = blk["combined_text"]
+                        active["avg_confidence"] = blk["avg_confidence"]
+                    continue
+
+            merged.append(active)
+            active = dict(blk)
+
+        if active is not None:
+            merged.append(active)
+
+        n_removed = len(sorted_blocks) - len(merged)
+        if n_removed:
+            logger.info(
+                "[%s] Rescue dedup merged %d duplicate OCR block(s) "
+                "(%d → %d blocks)",
+                episode_id, n_removed, len(sorted_blocks), len(merged),
+            )
+        return merged
+
     def _align_ocr_rescue(
         self,
         episode_id: str,
@@ -383,6 +437,7 @@ class OverlapAligner:
             "rescue: %d OCR block(s) promoted to master",
             episode_id, len(asr_segs), self._asr_min_segs, len(ocr_blocks),
         )
+        ocr_blocks = self._dedup_rescue_blocks(ocr_blocks, episode_id)
         results: list[AlignedSegment] = []
         for idx, blk in enumerate(ocr_blocks):
             context_text, context_ok = self._build_asr_context(blk, asr_segs)
