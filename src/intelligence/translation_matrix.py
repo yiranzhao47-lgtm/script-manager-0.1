@@ -70,6 +70,11 @@ def _secs_to_srt_ts(secs: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _is_cjk_text(text: str) -> bool:
+    """Return True if text contains at least one CJK character."""
+    return bool(re.search(r'[一-鿿㐀-䶿]', text))
+
+
 def _check_screen_limits(text: str) -> bool:
     """Return True if *text* passes all screen safety constraints."""
     lines = text.split("\n")
@@ -159,6 +164,10 @@ class TranslationMatrix:
         if not self._enabled:
             logger.info("TranslationMatrix disabled in config — skipping")
             return
+
+        # Ensure Western-style names are assigned before any translation
+        self._ensure_name_override()
+        self._char_map = self._build_char_map()
 
         n = len(episode_ids)
         logger.info(
@@ -631,10 +640,11 @@ class TranslationMatrix:
 
     def _build_char_map(self) -> dict[str, str]:
         """
-        Read data/meta/meta.json and build a flat mapping of every Chinese
-        name variant (canonical + aliases) → English canonical name.
+        Build zh-name → English-name mapping.
 
-        Characters without canonical_en are omitted (LLM will romanize freely).
+        Priority: char_name_en_override.json (Western names) > meta.json canonical_en (pinyin).
+        Only CJK aliases are added to the map — English aliases like "Ethan" are skipped
+        to prevent them from being remapped to a different canonical name.
         """
         meta_path = self._meta_dir / "meta.json"
         if not meta_path.exists():
@@ -648,20 +658,109 @@ class TranslationMatrix:
         with meta_path.open(encoding="utf-8") as f:
             meta = json.load(f)
 
+        # Load Western-name overrides if available
+        override: dict[str, str] = {}
+        override_path = self._meta_dir / "char_name_en_override.json"
+        if override_path.exists():
+            try:
+                with override_path.open(encoding="utf-8") as f:
+                    override = json.load(f)
+                logger.info(
+                    "Loaded %d Western-name overrides from char_name_en_override.json",
+                    len(override),
+                )
+            except Exception as exc:
+                logger.warning("Failed to load char_name_en_override.json: %s", exc)
+
         char_map: dict[str, str] = {}
         for canonical_zh, entry in meta.get("characters", {}).items():
-            en_name = entry.get("canonical_en")
+            # Prefer Western-name override; fall back to pinyin canonical_en
+            en_name = override.get(canonical_zh) or entry.get("canonical_en")
             if not en_name:
                 continue
             char_map[canonical_zh] = en_name
             for alias in entry.get("aliases", []):
-                char_map[alias] = en_name
+                # Skip English aliases (e.g. "Ethan") — they must not be remapped
+                if _is_cjk_text(alias):
+                    char_map[alias] = en_name
 
         logger.info(
-            "Character map built — %d zh→en name entries from meta.json",
+            "Character map built — %d zh→en name entries",
             len(char_map),
         )
         return char_map
+
+    def _ensure_name_override(self) -> None:
+        """
+        One-time Claude call to assign Western-style names to every character.
+        Result is cached in data/meta/char_name_en_override.json — idempotent.
+        """
+        override_path = self._meta_dir / "char_name_en_override.json"
+        if override_path.exists():
+            logger.info(
+                "char_name_en_override.json exists — skipping name-localization LLM call"
+            )
+            return
+
+        meta_path = self._meta_dir / "meta.json"
+        if not meta_path.exists():
+            logger.warning("meta.json not found — cannot run name localization")
+            return
+
+        with meta_path.open(encoding="utf-8") as f:
+            meta = json.load(f)
+
+        # Build per-character descriptor for the prompt
+        characters: list[dict] = []
+        for zh_canonical, entry in meta.get("characters", {}).items():
+            aliases = entry.get("aliases", [])
+            en_aliases = [a for a in aliases if not _is_cjk_text(a)]
+            item: dict = {
+                "zh_canonical": zh_canonical,
+                "current_romanization": entry.get("canonical_en") or "",
+            }
+            if en_aliases:
+                item["note"] = f"established English first name from show: {en_aliases[0]} ★"
+            characters.append(item)
+
+        drama_context = (
+            "Title: Win the Love War (胜爱情战争). Genre: workplace romance / short drama. "
+            "Setting: modern corporate environment in China. "
+            "Main characters include a fashion director (林展虹), a physician (闻誉施), "
+            "a CEO (陆子谦, known on-screen as Ethan)."
+        )
+
+        tmpl = self._jinja.get_template("localize_char_names.j2")
+        prompt = tmpl.render(
+            drama_context=drama_context,
+            characters_json=json.dumps(characters, ensure_ascii=False, indent=2),
+        )
+        system = "You are a professional drama localization specialist."
+
+        logger.info(
+            "Calling Claude for Western name assignment (%d characters)…",
+            len(characters),
+        )
+        try:
+            from src.utils.llm_client import extract_json
+            raw = self.llm_claude.complete(
+                system=system, user=prompt, module_name="NameLocalization"
+            )
+            result = extract_json(raw)
+            char_map = result.get("character_map", {})
+            if not char_map:
+                raise ValueError("Empty character_map in LLM response")
+
+            _atomic_json_write(override_path, char_map)
+            logger.info(
+                "Western-name override written — %d characters → %s",
+                len(char_map), override_path.name,
+            )
+        except Exception as exc:
+            logger.error(
+                "Name localization failed: %s — pinyin names will be used as fallback",
+                exc,
+            )
 
     def _load_glossary(self, path_str: str) -> dict[str, str]:
         """
