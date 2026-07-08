@@ -1,6 +1,6 @@
 # cc_script_manager — 短剧字幕自动化流水线
 
-> **40集全量测试通过（胜爱情战争）** · 双语模式就绪 · 检查点断点续传 · DeepSeek API 驱动
+> **80集全量测试通过（胜爱情战争）** · 双轨多语言翻译矩阵 · 检查点断点续传 · DeepSeek + Claude API 驱动
 
 ---
 
@@ -55,6 +55,20 @@
      └────────────────────────────────────────────────────┘
            │  输出: data/output/drama_structure_graph.json
            │         data/output/cost_report.json
+           │
+     Stage 6 ─ Translation (可选，由 intelligence.translation.enabled 开关控制)
+           │
+     ┌─────┴─────────────────────────────────────────────┐
+     │  src/intelligence/                                 │
+     │    translation_matrix.py — 双轨多语言翻译矩阵        │
+     │  config/prompts/                                   │
+     │    translate_en_skeleton.j2  — DeepSeek ZH→EN      │
+     │    refine_en_claude.j2       — Claude EN 润色       │
+     │    translate_minor_lang.j2   — DeepSeek 小语种      │
+     │    localize_char_names.j2    — 人名西化一次性调用    │
+     └────────────────────────────────────────────────────┘
+           │  输出: data/output/translations/{ep}_{lang}.srt
+           │         data/meta/char_name_en_override.json
 ```
 
 | 层次 | 关键文件 | 职责 |
@@ -75,6 +89,8 @@
 | 工具 | `token_counter.py` | tiktoken 估算，超限警告 |
 | 智能 | `rhythm_analyzer.py` | 两阶段 MapReduce 剧情因果链拆分，并行 Map + 单次 Reduce |
 | 智能 | `cost_auditor.py` | FinOps 核算：按模块分类 token 用量，输出 CNY 成本表 |
+| 翻译 | `translation_matrix.py` | 双轨多语言翻译矩阵：DeepSeek 骨架 + Claude 润色 + 多语言并发 |
+| 工具 | `scripts/reset_checkpoint.py` | 安全回滚单集检查点状态（Python，无 BOM 风险） |
 
 ### 1.2　Strategy 模式：一个开关驱动两套行为
 
@@ -388,6 +404,53 @@ same_lang:
     asr_min_segments: 10          # 低于此段数且 OCR≥5 时触发
 ```
 
+### 防御 8　OCR 救援路径同语言去重
+
+**文件：** `src/alignment/overlap_aligner.py` — `_dedup_rescue_blocks()`
+
+**问题：** ASR 稀疏救援（防御 7）触发时，OCR blocks 升格为 master。OCRDedup（防御 2）仅在 cross_lang 模式下运行，same_lang 模式下 OCR blocks 未经去重。字幕首帧/末帧 OCR 误读（如"干"读成"千"）会产生数个文本相似但起止时间不同的 block，全部升格后输出为 3 条重复字幕。
+
+ep01 实测：`干了什么全忘了` 出现 3 次，blocks 19-21，持续时间各约 0.5 s。
+
+**算法（前向合并，相似度 + 时间间隔双条件）：**
+
+```python
+_SIM_THRESH = 0.80   # SequenceMatcher ratio 阈值
+_GAP_THRESH = 0.6    # 相邻 block 起止间隔（秒）
+
+for blk in sorted_blocks:
+    gap = blk["start"] - active["end"]
+    if gap <= _GAP_THRESH:
+        sim = SequenceMatcher(None, active["combined_text"], blk["combined_text"]).ratio()
+        if sim >= _SIM_THRESH:
+            active["end"] = blk["end"]       # 合并：保留更高置信度的文本
+            continue
+    merged.append(active); active = blk
+```
+
+**调用点：** `_align_ocr_rescue()` 入口第一行，去重后再走后续对齐逻辑，下游无感知。
+
+### 防御 9　DeepSeek JSON 尾随逗号容错
+
+**文件：** `src/utils/llm_client.py` — `_strip_trailing_commas()`
+
+**问题：** DeepSeek 偶尔在 JSON 对象/数组末尾输出非法逗号（`"value",\n}`），导致 `json.loads()` 抛出 `JSONDecodeError`，整集翻译缓存写入失败。ep66、ep68 首次复现。
+
+**修复：**
+
+```python
+_RE_TRAILING_COMMA = re.compile(r",\s*([}\]])")
+
+def _strip_trailing_commas(s: str) -> str:
+    return _RE_TRAILING_COMMA.sub(r"\1", s)
+
+# extract_json / extract_json_array 均先尝试原始字符串，失败后尝试剥除版本
+for candidate in (s, _strip_trailing_commas(s)):
+    try:
+        result = json.loads(candidate)
+        ...
+```
+
 ---
 
 ## 第三章　生产环境实战 SOP
@@ -462,6 +525,15 @@ pending → asr_done → ocr_done → aligned → refined → complete
 ```powershell
 cat data\cache\checkpoint.json
 ```
+
+**安全回滚单集 checkpoint（推荐，避免 PowerShell BOM 污染）：**
+```powershell
+# 格式：python scripts/reset_checkpoint.py <episode_id> <state>
+# 有效状态：pending  asr_done  ocr_done  aligned  refined  complete
+python scripts/reset_checkpoint.py 01 ocr_done   # 将 ep01 回滚到 ocr_done
+```
+
+> **警告：** 不要用 PowerShell `Set-Content` / `ConvertTo-Json` 直接写入 `checkpoint.json`——PowerShell 5.1 的 UTF-8 编码默认带 BOM，Python `json.load()` 解析失败会把所有集数重置为 `pending`，触发全量重跑。始终用 `scripts/reset_checkpoint.py`。
 
 **重跑单集精修（删除对应 SRT 文件，checkpoint 不受影响）：**
 ```powershell
@@ -772,6 +844,122 @@ pricing:
              "calls": 5, "cost_cny": 0.0227 }
 }
 ```
+
+---
+
+## 第五章　Stage 6 Translation Matrix — 双轨多语言翻译
+
+### 5.1　架构：三步双轨并发
+
+```
+精修中文 SRT (data/output/{ep}.srt)
+         │
+   Step 1 — DeepSeek   ZH → EN 骨架（faithful，保留所有剧情信息）
+         │
+         ├─ Track A (并发) — Claude    EN 骨架 → EN 润色（US English，移动端观感）
+         └─ Track B (并发) — DeepSeek  EN 骨架 → th / vi / … （小语种，每种一线程）
+         │
+   Step 3 — 代码层校验：每条字幕 ≤3 行 / ≤40 字符/行 / ≤140 字符
+               违规 → correction retry → 仍违规 → 截断兜底
+         │
+   Step 4 — 写入翻译缓存 + 输出 SRT
+         │
+   输出: data/cache/translation/{ep}_translation.json
+         data/output/translations/{ep}_{lang}.srt
+```
+
+**关键设计决策：**
+
+- **从精修 SRT 读取，不从 aligned JSON 读取**：`EpisodeRefiner` 的 `_merge_short_fragments()` 会将 <300ms 碎片合并，中文 SRT 条数 < aligned JSON 条数。翻译矩阵读精修 SRT 作为源，保证英文 SRT 与中文 SRT 条数完全一致。
+- **小语种从骨架翻译，非从润色翻译**：骨架保留原文信息最完整，润色版已做美式英语适配，不宜作为泰语/越南语等的二次源。
+- **缓存双重校验**：命中需同时满足 `target_languages` 覆盖 + `segment_count` 与当前精修 SRT 匹配；任一不符则自动重跑。
+
+### 5.2　人名西化（一次性 LLM 调用）
+
+**文件：** `_ensure_name_override()` in `translation_matrix.py`  
+**缓存：** `data/meta/char_name_en_override.json`
+
+首次运行时，对 `meta.json` 中所有人物发起一次 Claude 调用，按剧情规则分配西化英文名：
+
+| 规则 | 示例 |
+|------|------|
+| 主角：剧中已有英文名 → 保留 | 陆子谦 → Ethan Lu（★ 剧中原名） |
+| 主配角：WesternFirst + ChineseSurname | 林展虹 → Diana Lin，闻誉施 → Sophia Wen |
+| 职位称呼：Title + Surname | 张副总 → VP Zhang，董事长 → Chairman |
+
+**增量更新：** 后续运行检测 `meta.json` 中新出现的人物，仅对增量字符发起 LLM 调用，结果合并到现有文件，已有映射保持不变。
+
+### 5.3　翻译质量保障
+
+#### idx-scatter 定位
+
+DeepSeek 偶尔合并相邻短句，返回条数 < 输入条数。旧代码顺序追加导致条目错位（内容偏移 + 末尾空白）。
+
+**修复：** `_parse_translation_array()` 改为按 `idx` 字段散射定位：
+
+```python
+result = [{"idx": i, "text": ""} for i in range(expected_count)]
+for item in arr:
+    idx = int(item.get("idx", sequential_fallback))
+    if 0 <= idx < expected_count:
+        result[idx]["text"] = item["text"]
+```
+
+空位再由 `_fill_missing_skeletons()` 单独补发 retry 填平。
+
+#### 两类空位补发
+
+| 阶段 | 方法 | 触发条件 |
+|------|------|---------|
+| Step 1 骨架 | `_fill_missing_skeletons()` | idx-scatter 后仍有空槽 → 仅发送缺失 `(idx, zh)` 对给 DeepSeek |
+| Step 2A 润色 | `_fill_missing_refined()` | Claude 返回条数不足 → 仅发送缺失骨架条目给 Claude 补润色 |
+
+#### 提示词关键约束
+
+`translate_en_skeleton.j2`（DeepSeek）：
+- **IDIOMS / EPITHETS**：`小财迷` = "money grubber"，不得逐字直译；成语译意义；职场骂人话维持攻击强度
+- **VENUE NAMES**：店名/场所名按含义意译（`晴天见` → "See You on a Sunny Day"），非拼音转写
+
+`refine_en_claude.j2`（Claude）：
+- 单行输出，禁止 `\n`（播放器自动换行）；代码层二次剥除保底
+- TONE BY SCENE TYPE：职场撕逼用直白美式英语，霸总冷场短句，恋爱张力保热度
+- 扩展 Chinglish 替换表："this matter / truly / let me tell you / not good" 等
+
+#### 覆盖率报告
+
+`run_all()` 结束时自动调用 `_log_coverage_report()`，扫描所有集数翻译缓存：
+
+```
+EN coverage gaps in 2/80 episode(s)  (3/3420 segments empty):
+  [25] 1/11 EN segments empty
+  [36] 2/18 EN segments empty
+```
+全部覆盖时打印 `EN coverage OK — all 80 episodes, 3420 segments, 0 empty`。
+
+### 5.4　CLI 命令
+
+```powershell
+# 仅运行翻译（ASR/OCR/对齐/精修全部走缓存）
+python pipeline.py --translate-only
+
+# API Key 注入（每次 Shell 会话执行一次）
+$env:DEEPSEEK_API_KEY    = "your_deepseek_key"
+$env:OPENROUTER_API_KEY  = "your_openrouter_key"   # Claude 通过 OpenRouter 调用
+```
+
+**输出目录结构：**
+```
+data/output/translations/
+  01_en.srt      ← 英文字幕（单行，Claude 润色）
+  02_en.srt
+  ...
+data/meta/
+  char_name_en_override.json   ← 人名西化映射，可手动修改后删缓存重跑
+data/cache/translation/
+  01_translation.json          ← 骨架 + 润色 + 小语种 完整翻译缓存
+```
+
+> **安全规则：** `DEEPSEEK_API_KEY` 与 `OPENROUTER_API_KEY` 只存在于环境变量，绝不写入任何文件。
 
 ---
 
