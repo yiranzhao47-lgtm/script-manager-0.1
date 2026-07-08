@@ -421,13 +421,21 @@ class TranslationMatrix:
             raw = client.complete(
                 system=system, user=user, module_name="Translation_Correction"
             )
-            corrected = self._parse_translation_array(raw, len(violations), ep_id, f"{lang_label}_corr")
-
-            # Merge corrections back by idx
-            idx_to_text = {item.get("idx", i): item.get("text", "") for i, item in enumerate(corrected)}
-            for v in violations:
-                if v in idx_to_text:
-                    result_arr[v]["text"] = idx_to_text[v]
+            # Parse correction response directly by idx value.
+            # Do NOT use _parse_translation_array (which enforces expected_count
+            # positional scatter) — the LLM returns original position idx values,
+            # not 0-based indices into the violations subset.
+            from src.utils.llm_client import extract_json_array
+            arr = extract_json_array(raw)
+            for i, item in enumerate(arr):
+                if isinstance(item, dict):
+                    idx = int(item.get("idx", violations[i] if i < len(violations) else -1))
+                    text = str(item.get("text", "")).strip()
+                else:
+                    idx = violations[i] if i < len(violations) else -1
+                    text = str(item).strip()
+                if text and 0 <= idx < len(result_arr):
+                    result_arr[idx]["text"] = text
         except Exception as exc:
             logger.warning(
                 "[%s][%s] Correction retry failed (%s) — falling back to truncation",
