@@ -17,6 +17,7 @@ torch>=2.1.0
 
 # ── LLM API ───────────────────────────────────────────────────────────────────
 openai>=1.30.0              # OpenAI-compatible client (works with custom base_url)
+anthropic>=0.30.0           # Anthropic SDK for Claude models (Track A EN refinement)
 
 # ── Resilience ────────────────────────────────────────────────────────────────
 tenacity>=8.3.0

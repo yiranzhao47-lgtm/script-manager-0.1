@@ -20,6 +20,9 @@ env/
 pipeline_run.log
 *.log
 
+# Claude Code local settings (may contain API keys / permission lists)
+.claude/
+
 # OS artifacts
 .DS_Store
 Thumbs.db

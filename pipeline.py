@@ -582,6 +582,10 @@ Examples:
 
   # Use a custom config:
   python pipeline.py --config config/my_project.yaml
+
+  # Translate already-refined episodes (no GPU required):
+  python pipeline.py --translate-only
+  python pipeline.py --translate-only --episodes 01,02,05
         """,
     )
     parser.add_argument(
@@ -607,7 +611,123 @@ Examples:
         action="store_true",
         help="Skip the language pre-flight detection",
     )
+    parser.add_argument(
+        "--translate-only",
+        action="store_true",
+        help=(
+            "Run only the TranslationMatrix layer on already-refined episodes. "
+            "No GPU required — reads aligned cache and calls LLM APIs only."
+        ),
+    )
+    parser.add_argument(
+        "--episodes",
+        default=None,
+        metavar="IDs",
+        help="Comma-separated episode IDs to process (e.g. 01,02,05). "
+             "Used with --translate-only to limit scope.",
+    )
     return parser
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Translation-only entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _run_translation_only(cfg: dict, episode_filter: Optional[list[str]] = None) -> None:
+    """
+    Run the TranslationMatrix layer on all already-refined episodes.
+
+    Does not touch ASR/OCR/alignment or the main checkpoint state machine.
+    Requires data/meta/meta.json to exist (produced by the MapReduce stage).
+    """
+    from src.utils.checkpoint import Checkpoint
+    from src.intelligence.translation_matrix import TranslationMatrix
+    from src.intelligence.cost_auditor import CostAuditor
+
+    cache_dir  = Path(cfg["paths"]["cache_dir"])
+    meta_dir   = Path(cfg["paths"]["meta_dir"])
+    output_dir = Path(cfg["paths"]["output_dir"])
+
+    # Require meta.json — character map is needed for name constraints
+    meta_path = meta_dir / "meta.json"
+    if not meta_path.exists():
+        logger.error(
+            "meta.json not found at %s — run the full pipeline first to generate "
+            "character metadata, then re-run with --translate-only",
+            meta_path,
+        )
+        sys.exit(1)
+
+    # Discover refinable episodes from aligned cache directory
+    aligned_dir = cache_dir / "aligned"
+    if not aligned_dir.exists():
+        logger.error(
+            "Aligned cache directory not found: %s — run the full pipeline first",
+            aligned_dir,
+        )
+        sys.exit(1)
+
+    ckpt = Checkpoint(cache_dir / "checkpoint.json")
+
+    all_aligned = sorted(
+        aligned_dir.glob("*_aligned.json"),
+        key=lambda p: [
+            int(part) if part.isdigit() else part.lower()
+            for part in re.split(r"(\d+)", p.stem)
+        ],
+    )
+    episode_ids = [p.stem.replace("_aligned", "") for p in all_aligned]
+
+    # Filter to refined/complete episodes only
+    episode_ids = [ep for ep in episode_ids if ckpt.is_at_least(ep, "refined")]
+
+    # Apply --episodes filter if provided
+    if episode_filter:
+        episode_ids = [ep for ep in episode_ids if ep in episode_filter]
+        missing = [ep for ep in episode_filter if ep not in episode_ids]
+        if missing:
+            logger.warning(
+                "--episodes filter: %s not found in refined episodes — skipping those",
+                missing,
+            )
+
+    if not episode_ids:
+        logger.warning(
+            "No refined episodes found. Run the main pipeline to refine episodes first."
+        )
+        return
+
+    logger.info(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    target_langs = cfg.get("intelligence", {}).get("translation", {}).get("target_languages", [])
+    logger.info(
+        "TranslationMatrix  |  episodes=%d  languages=en+%s",
+        len(episode_ids), target_langs,
+    )
+    logger.info(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    matrix = TranslationMatrix(cfg)
+    matrix.run_all(episode_ids)
+
+    # FinOps: report costs for both LLM clients
+    logger.info("─── FinOps: DeepSeek (skeleton + minor langs) ───")
+    CostAuditor(matrix.llm_ds, output_dir=output_dir).emit_financial_report(cfg)
+
+    if matrix.llm_claude is not matrix.llm_ds:
+        logger.info("─── FinOps: Claude (English refinement) ───")
+        CostAuditor(matrix.llm_claude, output_dir=output_dir).emit_financial_report(cfg)
+
+    logger.info(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    logger.info(
+        "Translation complete.  SRT files → %s",
+        output_dir / "translations",
+    )
 
 
 def main() -> None:
@@ -625,6 +745,15 @@ def main() -> None:
     if args.mode:
         cfg["pipeline"]["mode"] = args.mode
         logger.info("Mode overridden via --mode: %s", args.mode)
+
+    # ── Translation-only shortcut (no GPU, no preflight, no main pipeline) ───
+    if args.translate_only:
+        episode_filter = (
+            [ep.strip() for ep in args.episodes.split(",") if ep.strip()]
+            if args.episodes else None
+        )
+        _run_translation_only(cfg, episode_filter=episode_filter)
+        return
 
     # ── Auto-detect show change and self-heal ROI (must run before any stage) ──
     from src.utils.project_initializer import ProjectInitializer

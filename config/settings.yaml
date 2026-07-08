@@ -57,6 +57,13 @@ execution:
     base_url: "https://api.deepseek.com"  # null = use default OpenAI endpoint; set for custom
     api_key_env: "DEEPSEEK_API_KEY" # environment variable holding the API key
     max_tokens: 8000              # max completion tokens per episode LLM call
+
+  # Claude config — used by TranslationMatrix Track A (English refinement)
+  llm_claude:
+    model: "claude-sonnet-4-6"    # Anthropic Claude model ID
+    provider: "anthropic"         # tells LLMClient to use the anthropic SDK
+    api_key_env: "ANTHROPIC_API_KEY"
+    max_tokens: 8000
   token_budget:
     warn_tokens: 50000            # log WARNING when estimated input exceeds this
     limit_tokens: 100000          # log ERROR when estimated input exceeds this (still proceeds)
@@ -98,6 +105,12 @@ intelligence:
     map_max_tokens: 6000        # max completion tokens per episode analysis call
     reduce_max_tokens: 8000     # max completion tokens for the global blueprint call
     srt_char_limit: 15000       # truncate SRT content to this char limit before sending
+
+  # ── Multi-language translation matrix (run with: python pipeline.py --translate-only) ─
+  translation:
+    enabled: true               # master switch; --translate-only still respects this
+    target_languages: ["th", "vi"]   # ISO 639-1 codes: th=Thai, vi=Vietnamese, es=Spanish …
+    genre_glossary_path: "data/meta/fantasy_glossary.json"  # optional; silently skipped if missing
 
 # ── FinOps pricing (unit: CNY / million tokens) ───────────────────────────────
 pricing:
