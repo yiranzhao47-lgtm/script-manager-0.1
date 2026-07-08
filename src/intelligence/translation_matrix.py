@@ -190,6 +190,7 @@ class TranslationMatrix:
             "TranslationMatrix done — translated=%d  skipped(cache)=%d  errors=%d",
             n_ok, n_skip, n_err,
         )
+        self._log_coverage_report(episode_ids)
 
     def run_episode(self, ep_id: str) -> bool:
         """
@@ -362,7 +363,67 @@ class TranslationMatrix:
             result_arr, ep_id, "en_refined", self.llm_claude,
             lambda violations: self._render_screen_correction(ep_id, input_arr, violations, result_arr, "English"),
         )
+        result_arr = self._fill_missing_refined(result_arr, input_arr, ep_id)
         return [item.get("text", "") for item in result_arr]
+
+    def _fill_missing_refined(
+        self,
+        result_arr: list[dict],
+        skeleton_arr: list[dict],
+        ep_id: str,
+    ) -> list[dict]:
+        """
+        Retry Claude refinement for entries where en_refined is empty but
+        en_skeleton has content.  Sends only the missing (idx, skeleton_text)
+        pairs to avoid re-processing the full episode.
+        """
+        missing = [
+            i for i, item in enumerate(result_arr)
+            if not item.get("text", "").strip()
+            and i < len(skeleton_arr)
+            and skeleton_arr[i].get("text", "").strip()
+        ]
+        if not missing:
+            return result_arr
+
+        logger.warning(
+            "[%s][en_refined] %d/%d entries empty after scatter — targeted fill retry",
+            ep_id, len(missing), len(result_arr),
+        )
+
+        retry_input = [
+            {"idx": i, "text": skeleton_arr[i]["text"]}
+            for i in missing
+        ]
+        system = "You are a US English subtitle polisher for short drama streaming content."
+        user = (
+            f"Episode {ep_id}: Polish these English subtitle entries. "
+            f"Each input must produce exactly ONE polished output — never merge entries. "
+            f"Max 3 lines, 40 chars/line, 140 chars total. "
+            f"Return ONLY a JSON array of {{\"idx\": <int>, \"text\": \"<polished>\"}} objects.\n\n"
+            f"{json.dumps(retry_input, ensure_ascii=False, indent=2)}"
+        )
+
+        try:
+            from src.utils.llm_client import extract_json_array
+            raw = self.llm_claude.complete(
+                system=system, user=user, module_name="Translation_EN_Refine_Fill"
+            )
+            arr = extract_json_array(raw)
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                idx = int(item.get("idx", -1))
+                text = str(item.get("text", "")).strip()
+                if text and 0 <= idx < len(result_arr):
+                    result_arr[idx]["text"] = text
+        except Exception as exc:
+            logger.warning(
+                "[%s] Refined fill retry failed: %s — will fall back to skeleton",
+                ep_id, exc,
+            )
+
+        return result_arr
 
     def _step2b_minor_lang(
         self, input_arr: list[dict], ep_id: str, lang: str
@@ -645,9 +706,17 @@ class TranslationMatrix:
     def _emit_srts(self, ep_id: str, cache_data: dict) -> None:
         """Write one SRT file per output language to data/output/translations/."""
         segs = cache_data.get("segments", [])
-        # Emit en_refined as the English SRT
-        self._write_srt(ep_id, "en", [s.get("en_refined") or s.get("en_skeleton", "") for s in segs], segs)
-        # Emit each minor language
+        en_texts = [s.get("en_refined") or s.get("en_skeleton", "") for s in segs]
+
+        # Cross-validate: warn if any EN segments are empty
+        empty_en = sum(1 for t in en_texts if not t.strip())
+        if empty_en:
+            logger.warning(
+                "[%s] EN coverage: %d/%d segments are empty",
+                ep_id, empty_en, len(segs),
+            )
+
+        self._write_srt(ep_id, "en", en_texts, segs)
         for lang in self._target_langs:
             texts = [s.get(lang, "") for s in segs]
             self._write_srt(ep_id, lang, texts, segs)
@@ -675,6 +744,51 @@ class TranslationMatrix:
         tmp.write_text(content, encoding="utf-8")
         tmp.replace(srt_path)
         logger.info("SRT written — [%s][%s]  %d entries  → %s", ep_id, lang, counter - 1, srt_path.name)
+
+    # ------------------------------------------------------------------ #
+    #  Coverage report                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _log_coverage_report(self, episode_ids: list[str]) -> None:
+        """
+        Summarise EN translation coverage across all episodes after a run.
+        Logs one WARNING line per episode with gaps, then a totals summary.
+        """
+        issues: list[str] = []
+        total_segs = 0
+        total_empty = 0
+
+        for ep_id in episode_ids:
+            cache_path = self._trans_cache / f"{ep_id}_translation.json"
+            if not cache_path.exists():
+                issues.append(f"  [{ep_id}] no translation cache")
+                continue
+            try:
+                data = self._load_cache(cache_path)
+                segs = data.get("segments", [])
+                empty = sum(
+                    1 for s in segs
+                    if not (s.get("en_refined") or s.get("en_skeleton", "")).strip()
+                )
+                total_segs  += len(segs)
+                total_empty += empty
+                if empty:
+                    issues.append(f"  [{ep_id}] {empty}/{len(segs)} EN segments empty")
+            except Exception as exc:
+                issues.append(f"  [{ep_id}] cache read error: {exc}")
+
+        if issues:
+            logger.warning(
+                "EN coverage gaps in %d/%d episode(s)  (%d/%d segments empty):\n%s",
+                len(issues), len(episode_ids),
+                total_empty, total_segs,
+                "\n".join(issues),
+            )
+        else:
+            logger.info(
+                "EN coverage OK — all %d episodes, %d segments, 0 empty",
+                len(episode_ids), total_segs,
+            )
 
     # ------------------------------------------------------------------ #
     #  Aligned segment loading                                              #
@@ -767,16 +881,14 @@ class TranslationMatrix:
 
     def _ensure_name_override(self) -> None:
         """
-        One-time Claude call to assign Western-style names to every character.
-        Result is cached in data/meta/char_name_en_override.json — idempotent.
+        Assign Western-style names to every character in meta.json.
+        Result is cached in data/meta/char_name_en_override.json.
+
+        Incremental: if the file already exists, only processes characters that
+        are new in meta.json since the last run.  Merges new names into the
+        existing override so previously assigned names are preserved.
         """
         override_path = self._meta_dir / "char_name_en_override.json"
-        if override_path.exists():
-            logger.info(
-                "char_name_en_override.json exists — skipping name-localization LLM call"
-            )
-            return
-
         meta_path = self._meta_dir / "meta.json"
         if not meta_path.exists():
             logger.warning("meta.json not found — cannot run name localization")
@@ -785,9 +897,32 @@ class TranslationMatrix:
         with meta_path.open(encoding="utf-8") as f:
             meta = json.load(f)
 
-        # Build per-character descriptor for the prompt
+        all_chars = set(meta.get("characters", {}).keys())
+
+        # Load existing override (may be empty on first run)
+        existing_override: dict[str, str] = {}
+        if override_path.exists():
+            try:
+                with override_path.open(encoding="utf-8") as f:
+                    existing_override = json.load(f)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load existing char_name_en_override.json: %s — will rebuild",
+                    exc,
+                )
+
+        new_chars = all_chars - set(existing_override.keys())
+        if not new_chars:
+            logger.info(
+                "char_name_en_override.json covers all %d characters — skipping name-localization LLM call",
+                len(existing_override),
+            )
+            return
+
+        # Build per-character descriptor for just the new characters
         characters: list[dict] = []
-        for zh_canonical, entry in meta.get("characters", {}).items():
+        for zh_canonical in sorted(new_chars):
+            entry = meta["characters"][zh_canonical]
             aliases = entry.get("aliases", [])
             en_aliases = [a for a in aliases if not _is_cjk_text(a)]
             item: dict = {
@@ -813,7 +948,7 @@ class TranslationMatrix:
         system = "You are a professional drama localization specialist."
 
         logger.info(
-            "Calling Claude for Western name assignment (%d characters)…",
+            "Calling Claude for Western name assignment (%d new character(s))…",
             len(characters),
         )
         try:
@@ -826,9 +961,10 @@ class TranslationMatrix:
             if not char_map:
                 raise ValueError("Empty character_map in LLM response")
 
-            _atomic_json_write(override_path, char_map)
+            merged = {**existing_override, **char_map}
+            _atomic_json_write(override_path, merged)
             logger.info(
-                "Western-name override written — %d characters → %s",
+                "Western-name override updated — %d new character(s) added → %s",
                 len(char_map), override_path.name,
             )
         except Exception as exc:
