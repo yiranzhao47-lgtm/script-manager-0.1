@@ -70,6 +70,13 @@ def _secs_to_srt_ts(secs: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _srt_ts_to_secs(ts: str) -> float:
+    """Convert SRT timestamp HH:MM:SS,mmm to float seconds."""
+    h, m, rest = ts.split(":")
+    s, ms = rest.split(",")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+
 def _is_cjk_text(text: str) -> bool:
     """Return True if text contains at least one CJK character."""
     return bool(re.search(r'[一-鿿㐀-䶿]', text))
@@ -200,24 +207,35 @@ class TranslationMatrix:
         """
         cache_path = self._trans_cache / f"{ep_id}_translation.json"
 
-        # Cache hit: if cache covers current target_langs → emit SRTs and return
+        # Cache hit: if cache covers current target_langs AND segment count matches
+        segs: list[dict] | None = None
         if cache_path.exists():
             existing = self._load_cache(cache_path)
             cached_langs = set(existing.get("target_languages", []))
             if set(self._target_langs) <= cached_langs:
+                # Also validate segment count against the current source
+                segs = self._load_aligned_segs(ep_id)
+                cached_count = existing.get("segment_count", -1)
+                if len(segs) == cached_count:
+                    logger.info(
+                        "Translation cache hit — [%s] skipping LLM calls", ep_id
+                    )
+                    self._emit_srts(ep_id, existing)
+                    return True
                 logger.info(
-                    "Translation cache hit — [%s] skipping LLM calls", ep_id
+                    "[%s] Cache segment count mismatch (%d cached vs %d current) — re-running",
+                    ep_id, cached_count, len(segs),
                 )
-                self._emit_srts(ep_id, existing)
-                return True
-            # Cache exists but covers fewer languages than requested → partial redo
-            logger.info(
-                "[%s] Cache found but missing languages %s — re-running",
-                ep_id, sorted(set(self._target_langs) - cached_langs),
-            )
+            else:
+                # Cache exists but covers fewer languages than requested → partial redo
+                logger.info(
+                    "[%s] Cache found but missing languages %s — re-running",
+                    ep_id, sorted(set(self._target_langs) - cached_langs),
+                )
 
-        # Load aligned segments
-        segs = self._load_aligned_segs(ep_id)
+        # Load aligned segments (reuse if already loaded during cache validation)
+        if segs is None:
+            segs = self._load_aligned_segs(ep_id)
         if not segs:
             logger.warning("[%s] No aligned segments — translation skipped", ep_id)
             return False
@@ -364,6 +382,12 @@ class TranslationMatrix:
             lambda violations: self._render_screen_correction(ep_id, input_arr, violations, result_arr, "English"),
         )
         result_arr = self._fill_missing_refined(result_arr, input_arr, ep_id)
+
+        # EN SRT must be single-line — collapse any \n the LLM inserted
+        for item in result_arr:
+            if "\n" in item.get("text", ""):
+                item["text"] = " ".join(item["text"].split("\n")).strip()
+
         return [item.get("text", "") for item in result_arr]
 
     def _fill_missing_refined(
@@ -796,10 +820,26 @@ class TranslationMatrix:
 
     def _load_aligned_segs(self, ep_id: str) -> list[dict]:
         """
-        Read data/cache/aligned/{ep_id}_aligned.json.
-        Returns list of {segment_id, start, end, source_zh}.
-        source_zh = master_text from AlignedSegment.
+        Load the source segments for translation.
+
+        Preferred source: the refined Chinese SRT at data/output/{ep}.srt —
+        this is post-merge (short fragments collapsed) and LLM-polished, so the
+        EN SRT entry count matches the ZH SRT entry count exactly.
+
+        Fallback: raw aligned JSON if the refined SRT does not yet exist.
         """
+        refined_srt = self._output_dir / f"{ep_id}.srt"
+        if refined_srt.exists():
+            segs = self._parse_srt_to_segs(ep_id, refined_srt)
+            if segs:
+                logger.debug(
+                    "[%s] Translation source: refined SRT (%d segments)", ep_id, len(segs)
+                )
+                return segs
+            logger.warning(
+                "[%s] Refined SRT empty — falling back to aligned JSON", ep_id
+            )
+
         aligned_path = self._aligned_dir / f"{ep_id}_aligned.json"
         if not aligned_path.exists():
             logger.warning(
@@ -819,6 +859,34 @@ class TranslationMatrix:
                 "segment_id": raw_seg.get("segment_id", ""),
                 "start":      float(raw_seg.get("start", 0.0)),
                 "end":        float(raw_seg.get("end",   0.0)),
+                "source_zh":  text,
+            })
+        logger.debug(
+            "[%s] Translation source: aligned JSON (%d segments)", ep_id, len(result)
+        )
+        return result
+
+    def _parse_srt_to_segs(self, ep_id: str, srt_path: Path) -> list[dict]:
+        """Parse a Chinese SRT file into the segment dict format used by translation."""
+        content = srt_path.read_text(encoding="utf-8")
+        result = []
+        for i, block in enumerate(re.split(r"\n\n+", content.strip())):
+            lines = block.strip().split("\n")
+            if len(lines) < 3:
+                continue
+            m = re.match(
+                r"(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})",
+                lines[1],
+            )
+            if not m:
+                continue
+            text = "\n".join(lines[2:]).strip()
+            if not text:
+                continue
+            result.append({
+                "segment_id": f"{ep_id}_{i:04d}",
+                "start":      _srt_ts_to_secs(m.group(1)),
+                "end":        _srt_ts_to_secs(m.group(2)),
                 "source_zh":  text,
             })
         return result
