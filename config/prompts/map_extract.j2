@@ -1,0 +1,53 @@
+{#
+  Map phase — entity extraction from one batch of episodes.
+
+  Variables:
+    batch_index   int    0-based batch number
+    mode          str    "same_lang" | "cross_lang"
+    episode_range str    "ep01–ep20"
+    text_content  str    formatted episode text (see map_phase.py)
+#}
+This is batch {{ batch_index + 1 }} of a Chinese short-drama series ({{ episode_range }}).
+{% if mode == "same_lang" %}
+The text below is the Chinese ASR transcript for this episode batch.
+{% else %}
+The text below contains paired lines from each subtitle segment:
+  [OCR] = English subtitle as captured from the screen
+  [ASR] = Chinese audio transcript of the same moment
+{% endif %}
+
+━━ YOUR TASK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Extract every **recurring** character name and all forms of address used for
+that character in this batch.
+
+Rules
+─────
+1.  Include a name ONLY if it appears at least **twice** in the text below.
+    Ignore one-off or clearly incidental mentions.
+2.  The canonical name should be the most **formal or complete** form
+    (e.g. "霍建华" not "建华", "Ji-hoon" not "hoon").
+3.  Aliases are **every other form** the text uses to address that character
+    (titles, nicknames, shortened forms).
+4.  This is only a portion of the full series — do not invent names or
+    relationships not present in this text.
+{% if mode == "cross_lang" %}
+5.  For cross_lang: map each Chinese canonical name to its English subtitle
+    equivalent found in [OCR] lines.  Also list any OCR typos or variant
+    spellings of the English name as ocr_en_variants.
+{% endif %}
+
+━━ OUTPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Return ONLY the following JSON — no prose, no code fences, no commentary:
+
+{
+  "characters": {
+    "<canonical_zh_name>": {
+      "aliases": ["<form_1>", "<form_2>"],
+      "canonical_en": "<English_subtitle_name_or_null>",
+      "ocr_en_variants": ["<typo_1>", "<variant_2>"]
+    }
+  }
+}
+
+━━ TEXT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{ text_content }}

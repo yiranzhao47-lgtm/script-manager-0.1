@@ -1,0 +1,106 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  cc_script_manager — Pipeline Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Global pipeline switch ────────────────────────────────────────────────────
+pipeline:
+  mode: "same_lang"         # "same_lang" | "cross_lang"
+                            # same_lang  : Chinese audio + Chinese subtitles (ASR master)
+                            # cross_lang : Chinese audio + English subtitles (OCR master)
+
+# ── same_lang mode (中配中字) ──────────────────────────────────────────────────
+same_lang:
+  asr:
+    model: "large-v3"       # stable-whisper model name
+    device: "cuda"          # "cuda" | "cpu"
+    compute_type: "float16" # faster-whisper precision: "float16" | "int8" | "float32"
+  ocr:
+    fps: 2                  # frames per second sampled for OCR
+    roi: [0.602, 0.6933]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
+    language: "ch"          # PaddleOCR language code
+    use_gpu: true
+  alignment:
+    min_overlap_abs_sec: 0.5      # absolute overlap threshold (seconds)
+    min_overlap_ratio: 0.40       # relative threshold: overlap / ASR_duration
+    min_asr_duration_sec: 0.2     # ASR segments shorter than this skip OCR binding
+    asr_sparse_rescue: true       # use OCR blocks as master when ASR is too sparse
+    asr_min_segments: 10          # trigger rescue if ASR has fewer than this many segments
+
+# ── cross_lang mode (中配英字 / 外语译制) ─────────────────────────────────────
+cross_lang:
+  asr:
+    role: "semantic_anchor"       # "semantic_anchor" | "disabled"
+                                  # semantic_anchor: Chinese audio anchors English OCR correction
+    model: "large-v3"
+    device: "cuda"
+    compute_type: "float16"
+  ocr:
+    fps: 5                        # higher FPS to catch every subtitle cut
+    roi: [0.80, 0.95]
+    language: "en"
+    use_gpu: true
+  dedup:
+    similarity_threshold: 0.85    # SequenceMatcher ratio to treat frames as same subtitle
+    min_segment_duration_sec: 0.4 # discard OCR segments shorter than this (fade artifacts)
+    normalize_before_compare: true # strip tags/symbols/case before similarity calc
+
+# ── MapReduce entity extraction ───────────────────────────────────────────────
+metadata:
+  map_batch_size: 20              # episodes per Map-phase LLM batch
+  reduce_llm_canonicalize: true   # 5th LLM call: same-phonetic + OCR-typo merging
+  cross_lang_name_mapping: true   # extract zh-audio ↔ en-subtitle character name pairs
+
+# ── Execution layer (LLM refinement) ─────────────────────────────────────────
+execution:
+  llm:
+    model: "deepseek-chat"         # any OpenAI-compatible model identifier
+    base_url: "https://api.deepseek.com"  # null = use default OpenAI endpoint; set for custom
+    api_key_env: "DEEPSEEK_API_KEY" # environment variable holding the API key
+    max_tokens: 8000              # max completion tokens per episode LLM call
+  token_budget:
+    warn_tokens: 50000            # log WARNING when estimated input exceeds this
+    limit_tokens: 100000          # log ERROR when estimated input exceeds this (still proceeds)
+  prompts:
+    same_lang: "refine_same_lang.j2"
+    cross_lang: "refine_cross_lang.j2"
+    map_extract: "map_extract.j2"
+    reduce_canonicalize: "reduce_canonicalize.j2"
+  retry:
+    max_attempts: 5
+    wait_min_sec: 1
+    wait_max_sec: 60
+    no_retry_codes: [400, 401]    # never retry auth / malformed-request errors
+
+# ── GPU memory management ─────────────────────────────────────────────────────
+gpu:
+  enforce_sequential: true        # refuse to load two models simultaneously
+  process_isolation: false        # true = each model in a subprocess (safer, slower)
+
+# ── Language pre-flight detection ─────────────────────────────────────────────
+lang_detection:
+  episodes_to_check: 3            # inspect first N episodes
+  frames_per_episode: 5           # random frames sampled per episode
+  cjk_ratio_threshold: 0.30       # fraction of CJK chars that means "Chinese dominant"
+  fatal_on_mismatch: true         # abort pipeline on mode / video-language conflict
+
+# ── File system paths ─────────────────────────────────────────────────────────
+paths:
+  raw_video_dir: "data/raw/win the love war-cn"  # source video files (01.mp4, 02.mp4, …)
+  cache_dir: "data/cache"         # intermediate cache (asr/, ocr/, aligned/, map_batches/)
+  meta_dir: "data/meta"           # meta_raw.json + meta.json (human-review checkpoint)
+  output_dir: "data/output"       # final .srt files + validation_report.json
+
+# ── Layer 5 Intelligence — drama rhythm analysis ─────────────────────────────
+intelligence:
+  drama_analysis:
+    enabled: true               # set to true to run rhythm analysis after refinement
+    map_workers: 4              # parallel LLM workers for the map phase
+    map_max_tokens: 6000        # max completion tokens per episode analysis call
+    reduce_max_tokens: 8000     # max completion tokens for the global blueprint call
+    srt_char_limit: 15000       # truncate SRT content to this char limit before sending
+
+# ── FinOps pricing (unit: CNY / million tokens) ───────────────────────────────
+pricing:
+  deepseek-chat:
+    input_cost_per_m:  1.0        # ¥1.00 per 1 M input tokens
+    output_cost_per_m: 2.0        # ¥2.00 per 1 M output tokens

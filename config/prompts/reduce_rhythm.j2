@@ -1,0 +1,90 @@
+You are a professional Chinese short-drama story architect.
+
+Your task: read the condensed conflict chain for all {{ n_episodes }} episodes below and
+produce a single macro blueprint that maps the causal debt accumulation, identifies two
+structural pinch points, classifies the post-first-pinch commercial flow, and recommends
+high-impact marketing clips.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONDENSED CONFLICT CHAIN  ({{ n_episodes }} episodes, no dialogue included)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{ conflict_chain }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ANALYSIS FRAMEWORK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEBT CHAIN NARRATIVE
+Trace how a specific causal obligation (secret, threat, promise, betrayal) accumulates
+across episodes through new complications and partial collisions, then finally detonates.
+Write as a continuous prose narrative of cause → consequence → new cause.
+Do not list episodes mechanically — tell the story of the debt.
+
+PINCH POINT DETECTION
+A pinch point is the episode-scene where accumulated causal debt collides with a reversal
+event, forcing the story into a new trajectory.
+
+  First pinch:  falls somewhere between episodes 7–15
+                (the moment the protagonist's initial strategy collapses)
+  Second pinch: falls somewhere between episodes 20–30
+                (the moment before the final confrontation — all masks off)
+
+To locate a pinch: find the scene where the longest unresolved_debt chain from prior
+episodes finally triggers a concrete, irreversible consequence.  Specify the scene_id.
+
+POST-FIRST-PINCH COMMERCIAL FLOW
+After the first pinch, classify the story's energy pattern:
+  Type A — "Immediate explosion": the reversal detonates at once; pace accelerates;
+            audience hook is visceral shock and rapid payoff.
+  Type B — "Undercurrent burn": consequences ripple slowly; surface calm hides
+            deepening doom; audience hook is dread and dramatic irony.
+
+MARKETING CLIP RECOMMENDATIONS
+Recommend 3–6 clips drawn from specific scenes in the conflict chain.
+Each clip must have:
+  • mix_strategy:       "cold_open" | "montage" | "single_scene" | "confrontation_cut"
+  • action_start_focus: the concrete action or line at the START of the clip
+  • action_end_focus:   the concrete action or line at the END of the clip (the hook)
+  • contrast_rationale: what narrative contrast makes this clip shareable (no adjectives
+                        that score intensity — state the structural contrast factually)
+
+ABSOLUTE PROHIBITION:
+  ✗ No percentages, numeric scores, intensity ratings, or saturation levels
+  ✗ No phrases like "crisis level", "dramatic weight", "tension degree"
+  ✗ No subjective adjectives quantifying emotion (e.g. "highly emotional")
+  ✗ State structural, causal, factual observations only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  "debt_chain_narrative": "<continuous prose narrative of causal debt accumulation>",
+  "first_pinch": {
+    "episode_range": "<e.g. 'ep07–ep10'>",
+    "target_scene_id": "<e.g. 'ep09_sc_03'>",
+    "causal_trigger": "<the specific event that detonates the debt>",
+    "debt_source": "<which earlier unresolved_debt chain this resolves>",
+    "reversal_nature": "<what changes irreversibly after this scene>"
+  },
+  "second_pinch": {
+    "episode_range": "<e.g. 'ep22–ep26'>",
+    "target_scene_id": "<e.g. 'ep24_sc_02'>",
+    "causal_trigger": "<the specific event that detonates the debt>",
+    "debt_source": "<which earlier unresolved_debt chain this resolves>",
+    "reversal_nature": "<what changes irreversibly after this scene>"
+  },
+  "post_first_pinch_flow": {
+    "type": "A",
+    "rationale": "<one or two sentences, causal and factual, explaining the classification>"
+  },
+  "marketing_clips": [
+    {
+      "scene_id": "<scene_id from the conflict chain>",
+      "mix_strategy": "cold_open",
+      "action_start_focus": "<concrete opening action or line>",
+      "action_end_focus": "<concrete closing hook action or line>",
+      "contrast_rationale": "<structural contrast that makes this clip work>"
+    }
+  ]
+}

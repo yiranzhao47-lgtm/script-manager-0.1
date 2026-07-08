@@ -1,0 +1,83 @@
+You are a professional Chinese short-drama script analyst.
+
+Your task: analyse the SRT subtitle content for Episode {{ episode_id }} and segment it into
+3 to 8 scenes. For each scene, extract the causal facts, character actions, unresolved tensions,
+and story-turning signals.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KNOWN CHARACTERS (use exactly these names for speaker attribution)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{% if characters %}
+{% for name, info in characters.items() %}
+  • {{ name }}{% if info.canonical_en %} ({{ info.canonical_en }}){% endif %}{% if info.aliases %} — also known as: {{ info.aliases | join(", ") }}{% endif %}
+
+{% endfor %}
+{% else %}
+  (no character reference available — infer speaker names from context)
+{% endif %}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EPISODE {{ episode_id }} SRT CONTENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{ srt_content }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXTRACTION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. SCENE BOUNDARIES: each scene is a coherent causal unit — a location shift, a
+   power-relation shift, or a revelation that changes what characters know or want.
+   Do not split mechanically by time; split by narrative causality.
+
+2. SCENE ID FORMAT: "ep{{ episode_id }}_sc_01", "ep{{ episode_id }}_sc_02", etc.
+   Always zero-pad to two digits.
+
+3. scene_actions: a list of concrete facts about what characters DO or DECIDE
+   in this scene. State facts — do not evaluate or judge intensity.
+
+4. unresolved_debt: the specific causal obligation, secret, or threat that this
+   scene leaves hanging. One sentence, factual.  If nothing is left unresolved,
+   write null.
+
+5. pivot_signals: words, actions, or revelations in this scene that will
+   structurally reverberate in later episodes. Be specific (e.g. "X learns that
+   Y has the contract").  Empty list if none.
+
+6. structured_dialogues: for lines that reveal character intent, hidden
+   knowledge, or power shifts, capture them with the speaker name from the
+   KNOWN CHARACTERS list above.  Assign "UNKNOWN" only when you truly cannot
+   infer the speaker.  Omit trivial filler lines.
+
+ABSOLUTE PROHIBITION:
+  ✗ No percentages, numeric scores, or intensity ratings of any kind
+  ✗ No phrases like "crisis saturation", "tension level", "dramatic weight"
+  ✗ No subjective adjectives quantifying emotional states (e.g. "highly tense")
+  ✗ Stick to observable, causal, factual statements only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  "episode_id": "{{ episode_id }}",
+  "scenes": [
+    {
+      "scene_id": "ep{{ episode_id }}_sc_01",
+      "location": "<where the scene takes place>",
+      "time": "<time of day or temporal marker, e.g. 'morning', 'that night', 'three days later'>",
+      "scene_actions": [
+        "<action or decision — factual, causal>",
+        "..."
+      ],
+      "unresolved_debt": "<one-sentence causal obligation left open, or null>",
+      "pivot_signals": [
+        "<specific fact or action with structural future consequence>",
+        "..."
+      ],
+      "structured_dialogues": [
+        {"speaker": "<name from KNOWN CHARACTERS or UNKNOWN>", "line": "<verbatim or close paraphrase>"},
+        "..."
+      ]
+    }
+  ]
+}

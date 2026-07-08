@@ -1,0 +1,33 @@
+# Data directories — never commit raw video, cache, or outputs
+data/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Temporary and atomic write files
+*.tmp
+
+# Pipeline logs
+pipeline_run.log
+*.log
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets — never commit API keys
+.env
+*.env

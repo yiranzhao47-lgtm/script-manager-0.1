@@ -1,0 +1,46 @@
+{#
+  Reduce phase — merge and canonicalize entity lists from all map batches.
+
+  Variables:
+    n_batches         int    number of map batches being merged
+    batch_results_json str   JSON string of the Python-merged characters dict
+#}
+Below are character entity lists that were independently extracted from
+{{ n_batches }} separate batches of the same Chinese short-drama series and
+then merged by a Python script (aliases unioned, canonical names preserved).
+
+━━ YOUR TASK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Canonicalize the merged list.  Do NOT re-extract names — only reorganise
+what is already present.
+
+Canonicalization rules
+──────────────────────
+1.  Identify entries that represent the **same character** but differ due to:
+    •  Same-phonetic variants (同音字): e.g. "货建华" vs "霍建华"
+    •  OCR misreads: e.g. "豁" vs "霍", "0" vs "O" in English names
+    •  Abbreviated vs full names treated as separate entries
+    •  Different romanisation conventions for the same name
+2.  Merge all such entries under the single **most formal, most complete, or
+    most frequently occurring** canonical form.
+3.  Add every merged variant as an alias (including the discarded canonical).
+4.  Union all alias and ocr_en_variants lists.
+5.  Remove entries that appear to be **incidental** (very few aliases, clearly
+    not a character name — e.g. location names or random nouns).
+6.  Every entry in the output MUST include the "canonical" field.
+
+━━ OUTPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Return ONLY the following JSON — no prose, no code fences, no commentary:
+
+{
+  "characters": {
+    "<canonical_zh>": {
+      "canonical": "<canonical_zh>",
+      "aliases": ["<every_variant_including_merged_duplicates>"],
+      "canonical_en": "<English_name_or_null>",
+      "ocr_en_variants": ["<ocr_typo_1>", "<variant_2>"]
+    }
+  }
+}
+
+━━ INPUT DATA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{ batch_results_json }}

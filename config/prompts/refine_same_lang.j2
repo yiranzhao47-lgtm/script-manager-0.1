@@ -1,0 +1,69 @@
+{#
+  Execution: same_lang refinement prompt
+  ─────────────────────────────────────
+  Variables:
+    episode_number  str   episode identifier ("ep01", "ep03", …)
+    meta_json       str   JSON string of { "characters": { … } }
+    episode_json    str   JSON array of aligned segments
+#}
+You are a professional Chinese subtitle editor working on episode {{ episode_number }}
+of a contemporary short drama (短剧).
+
+━━ CHARACTER REFERENCE (meta.json) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{ meta_json }}
+
+━━ INPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Each segment has:
+  • "master_text"  — Chinese ASR transcript (what was SPOKEN; phonetically reliable)
+  • "context_text" — Chinese OCR text (what is DISPLAYED; may be censored or garbled)
+  • "start" / "end" — exact timestamps to preserve in output
+
+━━ YOUR TASK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1.  **Censored-word restoration** (highest priority)
+    Short dramas frequently censor aggressive dialogue on screen.  When
+    "context_text" shows a censored or masked form and "master_text" gives
+    you the phonetic ground truth, restore the authentic word.
+
+    Common patterns (OCR → authentic):
+      "弄S你" / "弄*你" / "弄○你"  →  "弄死你"    (ASR: "nòng sǐ nǐ")
+      "S人"  / "S了他"             →  "死人" / "死了他"
+      "废S"  / "废★"               →  "废物"
+      "去S"  / "去★"               →  "去死"
+      "狅"   / "狂*"               →  "狂"  (confirm with ASR)
+      "SB"   / "S.B."              →  contextually infer; retain if unclear
+      Any symbol (★☆✖●▲♦) replacing a character  →  infer from ASR phonetics
+
+    Decision rule:
+      • ASR "master_text" gives the phonetic reality — trust it over OCR.
+      • If ASR is also unclear, use the short-drama confrontation context
+        (争吵、威胁、傲娇 are dominant tones) to infer the most natural word.
+      • If genuinely ambiguous, output the ASR text verbatim without inventing.
+
+2.  **Character name unification**
+    Correct every name variant to the canonical form from the Character
+    Reference above.  Examples: "霍健华" / "霍剑华" / "货建华"  →  the
+    canonical form listed in meta_json.
+
+3.  **OCR/ASR conflict resolution**
+    When "context_text" (OCR) and "master_text" (ASR) differ in phrasing:
+      • If the difference is clearly a display censorship → rule 1 above.
+      • If OCR looks like an ASR homophone error → trust OCR display.
+      • If both are unintelligible → output ASR verbatim.
+
+4.  **Light copyediting only** — do NOT rewrite dialogue, do NOT add
+    punctuation the source does not have.  Preserve every segment's
+    start/end timestamp exactly.
+    You MAY merge consecutive segments when at least one has duration ≤ 0.3 s:
+    concatenate the Chinese text (no space) and use the first start / last end
+    timestamp.  Do NOT split segments.
+
+━━ OUTPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Return a valid SRT file ONLY.  Rules:
+  • Sequence numbers start at 1 and increment by 1.
+  • One blank line between every subtitle block — none inside a block.
+  • Timestamp format exactly: HH:MM:SS,mmm --> HH:MM:SS,mmm
+  • Use timestamps from the input JSON unchanged.
+  • No code fences, no prose commentary, no explanatory notes.
+
+━━ INPUT SEGMENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{ episode_json }}

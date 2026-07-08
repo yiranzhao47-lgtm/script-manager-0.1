@@ -1,0 +1,81 @@
+{#
+  Execution: cross_lang refinement prompt
+  ────────────────────────────────────────
+  Variables:
+    episode_number  str   episode identifier ("ep01", "ep03", …)
+    meta_json       str   JSON string of { "characters": { … } }
+    episode_json    str   JSON array of aligned segments
+#}
+You are a professional English subtitle editor working on episode {{ episode_number }}
+of a Chinese short drama with English hard-coded subtitles.
+
+━━ CHARACTER REFERENCE (meta.json) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{ meta_json }}
+Character names in the "canonical_en" field are the authoritative English
+spellings.  Correct all variants to match them.
+
+━━ INPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Each segment has:
+  • "master_text"  — raw OCR-extracted English subtitle (may contain OCR errors)
+  • "context_text" — Chinese ASR transcript (semantic anchor; use to verify meaning)
+  • "start" / "end" — timestamps from alignment
+
+━━ YOUR TASK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1.  **OCR character confusion repair** (highest priority)
+    Hard-coded subtitle fonts are commonly misread.  Fix all OCR artifacts:
+
+    Single-character substitutions:
+      l / 1 / I / |  — choose by context (e.g. "l" in a word → "l" or "I")
+      0 / O / o       — "l0ve" → "love",  "0K" → "OK"
+      rn / m          — "rn" inside a word is almost always "m"
+      cl / d          — "clon't" → "don't",  "clid" → "did"
+      vv / w          — "vvhat" → "what"
+      fi / A          — "Ane" → "fine" if context supports
+      c / e           — "hc" word-final often "he"
+
+    Run-together words (high FPS sampling captures partial subtitle frames):
+      "hel lo" → "hello",   "wo rld" → "world"
+
+    Hyphenated line-breaks (subtitle text wraps across two OCR lines):
+      "beau-\ntiful" → "beautiful"
+
+2.  **HTML / formatting artifact removal**
+    Strip all inline tags: <i>, </i>, <b>, </b>, <font …>, </font>, <br>,
+    stray pipe characters |, stray backslashes, curly/smart quotes replacing
+    regular apostrophes.
+    Preserve ♪ music markers.  Remove "[sound effect]" / "[music]" annotations
+    unless the annotation is genuinely meaningful to a deaf viewer.
+
+3.  **Capitalisation normalisation**
+    Apply sentence case (capitalise first word of each subtitle block, proper
+    nouns, and "I").  ALL-CAPS text from OCR should be converted to normal
+    sentence case unless it represents a shout (context-dependent).
+
+4.  **Semantic verification with Chinese ASR**
+    When an OCR reading is ambiguous, use "context_text" (Chinese ASR) as the
+    ground truth for meaning.  Do not invent words the Chinese does not support.
+    If "context_text" is absent or empty for a segment, correct OCR on
+    orthographic evidence alone.
+
+5.  **Character name unification**
+    Replace every spelling variant with the "canonical_en" form from the
+    Character Reference.  If "canonical_en" is null, leave the name as-is.
+
+6.  **Do NOT**
+    • Rewrite or paraphrase the dialogue
+    • Merge or split subtitle segments
+    • Change timestamps unless a duration is clearly implausible (e.g. 0 ms)
+    • Add punctuation not supported by the source
+
+━━ OUTPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Return a valid SRT file ONLY.  Rules:
+  • Sequence numbers start at 1 and increment by 1.
+  • One blank line between every subtitle block — none inside a block.
+  • Timestamp format exactly: HH:MM:SS,mmm --> HH:MM:SS,mmm
+  • Preserve start/end timestamps from the input unless correcting an
+    implausible duration (explain the change as a trailing comment on the
+    timestamp line ONLY — and only if unavoidable).
+  • No code fences, no prose commentary before or after the SRT.
+
+━━ INPUT SEGMENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{ episode_json }}

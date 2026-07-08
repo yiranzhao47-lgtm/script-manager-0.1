@@ -1,0 +1,36 @@
+# ── Core AI inference ─────────────────────────────────────────────────────────
+stable-ts>=2.14.0           # Whisper with word-level timestamps (wraps openai-whisper)
+paddleocr>=2.7.3            # OCR engine
+
+# PaddlePaddle backend — install EXACTLY ONE of the following:
+#   GPU (CUDA 12.x):  pip install paddlepaddle-gpu==2.6.1.post120 -f https://www.paddlepaddle.org.cn/whl/windows/mkl/avx/stable.html
+#   CPU only:         pip install paddlepaddle>=2.6.0
+# The line below is a placeholder; replace with the correct variant for your hardware.
+paddlepaddle-gpu>=2.6.0
+
+# PyTorch — install BEFORE stable-ts, matching your CUDA version.
+# Do NOT let pip auto-install torch from PyPI; it will pull the CPU-only build.
+# Example (CUDA 12.1):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Minimum required version:
+torch>=2.1.0
+
+# ── LLM API ───────────────────────────────────────────────────────────────────
+openai>=1.30.0              # OpenAI-compatible client (works with custom base_url)
+
+# ── Resilience ────────────────────────────────────────────────────────────────
+tenacity>=8.3.0
+
+# ── Configuration & prompt templating ─────────────────────────────────────────
+pyyaml>=6.0.1
+jinja2>=3.1.4
+
+# ── Video frame extraction ────────────────────────────────────────────────────
+opencv-python>=4.9.0
+
+# ── GPU memory telemetry ──────────────────────────────────────────────────────
+pynvml>=11.5.0
+
+# ── General utilities ─────────────────────────────────────────────────────────
+numpy>=1.26.0
+tqdm>=4.66.0
