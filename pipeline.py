@@ -628,6 +628,15 @@ Examples:
         help="Comma-separated episode IDs to process (e.g. 01,02,05). "
              "Used with --translate-only to limit scope.",
     )
+    parser.add_argument(
+        "--paywall-report",
+        action="store_true",
+        help=(
+            "Generate an AI-driven paywall & marketing strategy report from "
+            "drama_structure_graph.json. No GPU required — calls Claude only. "
+            "Output: data/output/paywall_strategy_report.md"
+        ),
+    )
     return parser
 
 
@@ -736,6 +745,44 @@ def _run_translation_only(cfg: dict, episode_filter: Optional[list[str]] = None)
     )
 
 
+def _run_paywall_report(cfg: dict) -> None:
+    """
+    Generate the AI paywall strategy report from drama_structure_graph.json.
+
+    Requires drama_structure_graph.json to exist (produced by Stage 5 drama
+    analysis).  No GPU required — calls Claude via OpenRouter only.
+    """
+    from src.intelligence.paywall_strategist import PaywallStrategist
+    from src.intelligence.cost_auditor import CostAuditor
+
+    output_dir = Path(cfg["paths"]["output_dir"])
+
+    logger.info(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    logger.info("PaywallStrategist  |  reading drama_structure_graph.json")
+    logger.info(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    strategist = PaywallStrategist(cfg)
+    try:
+        out_path = strategist.run()
+    except FileNotFoundError as exc:
+        logger.error("Paywall report failed: %s", exc)
+        sys.exit(1)
+
+    logger.info("─── FinOps: Claude (paywall strategy) ───")
+    CostAuditor(strategist.llm_claude, output_dir=output_dir).emit_financial_report(
+        cfg, cfg_key="llm_claude", report_filename="cost_report_paywall.json"
+    )
+
+    logger.info(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    logger.info("Paywall report complete → %s", out_path)
+
+
 def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
@@ -751,6 +798,11 @@ def main() -> None:
     if args.mode:
         cfg["pipeline"]["mode"] = args.mode
         logger.info("Mode overridden via --mode: %s", args.mode)
+
+    # ── Paywall report shortcut ───────────────────────────────────────────
+    if args.paywall_report:
+        _run_paywall_report(cfg)
+        return
 
     # ── Translation-only shortcut (no GPU, no preflight, no main pipeline) ───
     if args.translate_only:
