@@ -118,7 +118,7 @@ intelligence:
   # ── Multi-language translation matrix (run with: python pipeline.py --translate-only) ─
   translation:
     enabled: true               # master switch; --translate-only still respects this
-    target_languages: []              # empty = English only; add "th","vi",etc. for minor langs
+    target_languages: ["fr", "es"]    # French + Spanish produced alongside English by default
     genre_glossary_path: "data/meta/fantasy_glossary.json"  # optional; silently skipped if missing
 
 # ── FinOps pricing (unit: CNY / million tokens) ───────────────────────────────

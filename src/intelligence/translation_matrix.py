@@ -867,12 +867,13 @@ class TranslationMatrix:
 
     def _log_coverage_report(self, episode_ids: list[str]) -> None:
         """
-        Summarise EN translation coverage across all episodes after a run.
-        Logs one WARNING line per episode with gaps, then a totals summary.
+        Summarise translation coverage across all languages after a run.
+        Logs one WARNING line per episode with per-language gaps, then totals.
         """
+        all_langs = ["en"] + self._target_langs
         issues: list[str] = []
         total_segs = 0
-        total_empty = 0
+        total_empty: dict[str, int] = {lang: 0 for lang in all_langs}
 
         for ep_id in episode_ids:
             cache_path = self._trans_cache / f"{ep_id}_translation.json"
@@ -882,28 +883,38 @@ class TranslationMatrix:
             try:
                 data = self._load_cache(cache_path)
                 segs = data.get("segments", [])
-                empty = sum(
+                total_segs += len(segs)
+                ep_gaps: list[str] = []
+
+                empty_en = sum(
                     1 for s in segs
                     if not (s.get("en_refined") or s.get("en_skeleton", "")).strip()
                 )
-                total_segs  += len(segs)
-                total_empty += empty
-                if empty:
-                    issues.append(f"  [{ep_id}] {empty}/{len(segs)} EN segments empty")
+                total_empty["en"] += empty_en
+                if empty_en:
+                    ep_gaps.append(f"en:{empty_en}/{len(segs)}")
+
+                for lang in self._target_langs:
+                    empty = sum(1 for s in segs if not s.get(lang, "").strip())
+                    total_empty[lang] += empty
+                    if empty:
+                        ep_gaps.append(f"{lang}:{empty}/{len(segs)}")
+
+                if ep_gaps:
+                    issues.append(f"  [{ep_id}] empty segments — {', '.join(ep_gaps)}")
             except Exception as exc:
                 issues.append(f"  [{ep_id}] cache read error: {exc}")
 
         if issues:
             logger.warning(
-                "EN coverage gaps in %d/%d episode(s)  (%d/%d segments empty):\n%s",
+                "Coverage gaps in %d/%d episode(s):\n%s",
                 len(issues), len(episode_ids),
-                total_empty, total_segs,
                 "\n".join(issues),
             )
         else:
             logger.info(
-                "EN coverage OK — all %d episodes, %d segments, 0 empty",
-                len(episode_ids), total_segs,
+                "Coverage OK — all %d episodes, %d segments, 0 empty (%s)",
+                len(episode_ids), total_segs, "/".join(all_langs),
             )
 
     # ------------------------------------------------------------------ #
