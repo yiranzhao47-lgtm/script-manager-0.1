@@ -52,6 +52,20 @@ _MAX_LINES    = 3
 _MAX_LINE_LEN = 40
 _MAX_TOTAL    = 140
 
+# ── Continuation-split detection ──────────────────────────────────────────────
+# English entries that only make sense as a continuation of the previous entry
+# (infinitive phrase or negation contraction beginning a clause).
+# Excluded: "To be " — adverbial phrases like "To be honest," start fresh.
+_NEGATION_STARTERS = (
+    "Isn't ", "isn't ", "Doesn't ", "doesn't ",
+    "Don't ", "don't ", "Can't ", "can't ",
+    "Won't ", "won't ", "Wouldn't ", "wouldn't ",
+    "Couldn't ", "couldn't ", "Shouldn't ", "shouldn't ",
+    "Didn't ", "didn't ", "Wasn't ", "wasn't ",
+    "Weren't ", "weren't ", "Hasn't ", "hasn't ", "Haven't ", "haven't ",
+)
+_MAX_CONTINUATION_GAP_S = 0.5  # entries farther apart are likely different speakers
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Helpers
@@ -247,6 +261,9 @@ class TranslationMatrix:
 
         # Step 1 — ZH → EN skeleton (DeepSeek)
         skeleton = self._step1_skeleton(segs, ep_id)
+        # Fix continuation capitalization before Claude sees the skeleton,
+        # so it gets correct cues (no spurious period, lowercase continuation).
+        skeleton = self._fix_continuation_capitalization(skeleton, segs)
 
         # Step 2 — EN refine (Claude) + minor langs (DeepSeek), concurrent
         en_refined, lang_results = self._step2_parallel(skeleton, segs, ep_id)
@@ -590,6 +607,67 @@ class TranslationMatrix:
         result = "\n".join(lines)
         return result[:_MAX_TOTAL]
 
+    @staticmethod
+    def _fix_continuation_capitalization(
+        texts: list[str],
+        segs: list[dict],
+    ) -> list[str]:
+        """
+        Detect two-entry sentence splits from the English output itself.
+
+        This show's subtitle style uses no 。 on declarative lines, so
+        Chinese-punctuation heuristics fire on almost every entry.  The
+        English output contains reliable signals instead:
+
+          1. Previous EN entry ends with "." — LLM added a spurious period
+             to an incomplete clause (e.g. "Are you planning.")
+          2. Current EN entry starts with an infinitive "To [verb]" (but NOT
+             the adverbial "To be [adj]") or a negation contraction (Isn't /
+             Don't / Can't / etc.) — these only lead a subtitle entry when it
+             is a grammatical continuation, not a fresh sentence.
+          3. Current EN entry ends with "?" or "!" — closes the sentence.
+          4. Time gap between entries ≤ 500ms — same speaker, same breath.
+
+        Example (ep02):
+          prev: "你这是准备"    → EN "Are you planning."          ← spurious .
+          curr: "把公司打包送人" → EN "To give the company away for free?"
+
+        Fix each identified pair:
+          - strip the spurious "." from the previous EN entry
+          - lowercase the first letter of the continuation EN entry
+        """
+        result = list(texts)
+        for i in range(1, len(segs)):
+            prev_text = result[i - 1]
+            curr_text = result[i]
+
+            # Condition 1: previous has a spurious trailing period
+            if not prev_text.endswith("."):
+                continue
+
+            # Condition 2: current starts with a known continuation pattern
+            is_infinitive = (
+                curr_text.startswith("To ")
+                and not curr_text.startswith("To be ")
+            )
+            is_negation = any(curr_text.startswith(s) for s in _NEGATION_STARTERS)
+            if not (is_infinitive or is_negation):
+                continue
+
+            # Condition 3: current closes the sentence with ? or !
+            if not (curr_text.endswith("?") or curr_text.endswith("!")):
+                continue
+
+            # Condition 4: entries are temporally adjacent (same breath/clause)
+            gap_s = segs[i].get("start", 0) - segs[i - 1].get("end", 0)
+            if gap_s > _MAX_CONTINUATION_GAP_S:
+                continue
+
+            # Apply fix
+            result[i - 1] = prev_text[:-1]                         # drop spurious "."
+            result[i] = curr_text[0].lower() + curr_text[1:]       # un-capitalize
+        return result
+
     # ------------------------------------------------------------------ #
     #  JSON parsing with count validation                                   #
     # ------------------------------------------------------------------ #
@@ -744,6 +822,7 @@ class TranslationMatrix:
         """Write one SRT file per output language to data/output/translations/."""
         segs = cache_data.get("segments", [])
         en_texts = [s.get("en_refined") or s.get("en_skeleton", "") for s in segs]
+        en_texts = self._fix_continuation_capitalization(en_texts, segs)
 
         # Cross-validate: warn if any EN segments are empty
         empty_en = sum(1 for t in en_texts if not t.strip())
