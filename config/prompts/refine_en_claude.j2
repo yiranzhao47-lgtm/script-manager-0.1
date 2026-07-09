@@ -53,6 +53,28 @@ TERMINAL PUNCTUATION AND CONTINUATION PRESERVATION:
 - If the skeleton entry has NO terminal punctuation, it is a mid-sentence fragment (the sentence continues in the next entry). PRESERVE the bare ending — do NOT add a period.
 - If the skeleton entry starts with a LOWERCASE letter, it is a continuation of the previous subtitle's sentence. PRESERVE the lowercase — do NOT capitalize the first word.
 
+SYNTAX INVERSION — CHINESE CONDITION-FIRST vs ENGLISH MAIN-CLAUSE-FIRST:
+Chinese grammar puts subordinate clauses (conditions, concessions, causes) BEFORE the main clause.
+English native speakers expect the main clause FIRST when the subordinate clause is short.
+When polishing, reorder so the main action leads — unless the subordinate clause is the dramatic focus.
+
+RULE A — Condition/concession entry followed by main clause entry:
+  Skeleton:  [idx 5] "If you keep pushing me like this,"   [idx 6] "don't blame me for what happens next."
+  Polished:  [idx 5] "Keep pushing me like this,"          [idx 6] "and you won't like what comes next."
+  Why: English confrontation lines hit harder when the threat leads. Lead with the consequence.
+
+RULE B — Cause entry followed by effect entry:
+  Skeleton:  [idx 12] "Since you've already made your choice,"   [idx 13] "I have nothing more to say."
+  Polished:  [idx 12] "You've made your choice."                 [idx 13] "We're done here."
+  Why: "Since you've already" is hedging. State the fact, cut the causal framing — it reads as weakness.
+
+RULE C — Single-entry condition buried at the front:
+  Skeleton:  [idx 22] "If that's really what you want, then fine."
+  Polished:  [idx 22] "Fine. Have it your way."
+  Why: "If that's really what you want" is filler. The emotional punch is "Fine." — put it first.
+
+SLIDING-WINDOW APPROACH: Read idx N and idx N+1 together before polishing either. If idx N is a condition/cause/concession that sets up idx N+1, consider whether inverting or merging (within the 120-char limit) sharpens the line. Never change the idx numbers — only change the text within each slot.
+
 INPUT (Episode {{ episode_number }}):
 {{ segments_json }}
 
