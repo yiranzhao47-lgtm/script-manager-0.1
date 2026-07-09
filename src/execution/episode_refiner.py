@@ -203,7 +203,7 @@ class EpisodeRefiner:
 
         if valid:
             logger.info("EpisodeRefiner: %s — SRT valid on first attempt", episode_id)
-            _atomic_write(out_path, _merge_short_fragments(_merge_artifact_fragments(raw)))
+            _atomic_write(out_path, _clip_overlapping_ends(_merge_short_fragments(_merge_artifact_fragments(raw))))
             return str(out_path)
 
         # ── LLM call #2: correction retry ─────────────────────────────────
@@ -225,7 +225,7 @@ class EpisodeRefiner:
 
         if valid2:
             logger.info("EpisodeRefiner: %s — SRT valid after correction retry", episode_id)
-            _atomic_write(out_path, _merge_short_fragments(_merge_artifact_fragments(raw2)))
+            _atomic_write(out_path, _clip_overlapping_ends(_merge_short_fragments(_merge_artifact_fragments(raw2))))
             return str(out_path)
 
         # ── Both attempts failed: fallback ────────────────────────────────
@@ -424,7 +424,7 @@ class EpisodeRefiner:
         """
         fallback_srt = self._assemble_fallback_srt(segments)
         out_path = self._output_dir / f"{episode_id}.srt"
-        _atomic_write(out_path, _merge_short_fragments(_merge_artifact_fragments(fallback_srt)))
+        _atomic_write(out_path, _clip_overlapping_ends(_merge_short_fragments(_merge_artifact_fragments(fallback_srt))))
 
         self._append_validation_report(episode_id, reason)
         logger.warning(
@@ -628,6 +628,59 @@ def _merge_short_fragments(srt_text: str) -> str:
     if lines and lines[-1] == '':
         lines.pop()
     return '\n'.join(lines)
+
+
+def _clip_overlapping_ends(srt_text: str) -> str:
+    """Clip each block's end time to the next block's start time when they overlap.
+
+    Handles ~20ms overlaps introduced by OCR frame-interval rounding in same_lang
+    rescue mode.  The SRT validator does not check cross-block overlap, so this
+    pass is the last line of defence before writing.
+    """
+    if not srt_text or not srt_text.strip():
+        return srt_text
+
+    def _ms(ts: str) -> int:
+        h, rest = ts.split(":", 1)
+        mi, rest2 = rest.split(":", 1)
+        s, ms = rest2.split(",")
+        return int(h) * 3_600_000 + int(mi) * 60_000 + int(s) * 1_000 + int(ms)
+
+    def _fmt(total_ms: int) -> str:
+        ms = total_ms % 1_000
+        total_s = total_ms // 1_000
+        s = total_s % 60
+        total_m = total_s // 60
+        m = total_m % 60
+        h = total_m // 60
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    blocks: list[list[str]] = []
+    for raw in re.split(r"\n\n+", srt_text.strip()):
+        parts = raw.strip().split("\n", 2)
+        if len(parts) < 3:
+            continue
+        m = re.match(r"(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})", parts[1])
+        if m:
+            blocks.append([parts[0].strip(), m.group(1), m.group(2), parts[2].strip()])
+
+    clipped = False
+    for i in range(len(blocks) - 1):
+        end_ms   = _ms(blocks[i][2])
+        next_ms  = _ms(blocks[i + 1][1])
+        if end_ms > next_ms:
+            blocks[i][2] = _fmt(next_ms)
+            clipped = True
+
+    if not clipped:
+        return srt_text
+
+    lines: list[str] = []
+    for blk in blocks:
+        lines.extend([blk[0], f"{blk[1]} --> {blk[2]}", blk[3], ""])
+    if lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _strip_markdown_fence(text: str) -> str:

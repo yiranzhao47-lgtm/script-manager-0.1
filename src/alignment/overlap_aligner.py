@@ -284,6 +284,37 @@ class OverlapAligner:
             logger.warning("[%s] No ASR segments — aligned output is empty", episode_id)
             return []
 
+        # Leading OCR rescue: promote OCR blocks that precede the first ASR segment.
+        # Handles episodes where Whisper misses speech in the opening seconds (BGM,
+        # cold open with no clear voice) while OCR captured the on-screen subtitles.
+        leading_segs: list[AlignedSegment] = []
+        if asr_segs and ocr_blocks:
+            first_asr_start = asr_segs[0]["start"]
+            cutoff = first_asr_start - 1.0  # 1s safety margin before first ASR
+            leading = [b for b in ocr_blocks if b["end"] <= cutoff]
+            if leading:
+                leading = self._dedup_rescue_blocks(leading, episode_id)
+                logger.info(
+                    "[%s] Leading OCR rescue: %d block(s) before first ASR at %.2fs",
+                    episode_id, len(leading), first_asr_start,
+                )
+                for idx, blk in enumerate(leading):
+                    leading_segs.append(
+                        AlignedSegment(
+                            segment_id=f"{episode_id}_lead_{idx:04d}",
+                            start=blk["start"],
+                            end=blk["end"],
+                            master_text=blk["combined_text"],
+                            master_source="ocr_leading",
+                            master_confidence=blk["avg_confidence"],
+                            hallucination_risk=False,
+                            context_text="",
+                            context_source="ocr",
+                            context_available=False,
+                            ocr_candidates=[],
+                        )
+                    )
+
         results: list[AlignedSegment] = []
         for seg in asr_segs:
             asr_dur = seg["end"] - seg["start"]
@@ -317,7 +348,7 @@ class OverlapAligner:
             )
 
         self._log_coverage_same_lang(episode_id, results, ocr_blocks)
-        return results
+        return leading_segs + results
 
     def _find_ocr_candidates(
         self,
