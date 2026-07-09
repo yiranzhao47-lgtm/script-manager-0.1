@@ -131,6 +131,10 @@ class EpisodeRefiner:
         self._validator = SRTValidator()
         self._jinja = _build_jinja_env()
 
+        # Configurable watermark keyword blacklist (platform intros/outros)
+        asr_cfg = cfg.get(self._mode, {}).get("asr", {})
+        self._watermark_patterns: list[str] = asr_cfg.get("watermark_patterns", [])
+
         out_dir: str = cfg.get("paths", {}).get("output_dir", "data/output")
         self._output_dir = Path(out_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,6 +182,10 @@ class EpisodeRefiner:
             logger.warning("EpisodeRefiner: no segments in %s — writing empty SRT", src_path.name)
             _atomic_write(out_path, "")
             return str(out_path)
+
+        # ── Watermark filter ──────────────────────────────────────────────
+        if self._watermark_patterns:
+            segments = self._filter_watermarks(segments, episode_id)
 
         # ── Build prompt ──────────────────────────────────────────────────
         segments_json = self._format_segments(segments)
@@ -234,6 +242,23 @@ class EpisodeRefiner:
     # ------------------------------------------------------------------ #
     #  Prompt construction                                                 #
     # ------------------------------------------------------------------ #
+
+    def _filter_watermarks(self, segments: list[dict], episode_id: str) -> list[dict]:
+        """Remove segments whose master_text matches a known platform watermark pattern."""
+        filtered = [
+            s for s in segments
+            if not any(p in s.get("master_text", "") for p in self._watermark_patterns)
+        ]
+        removed = len(segments) - len(filtered)
+        if removed:
+            logger.warning(
+                "EpisodeRefiner: [%s] %d watermark segment(s) removed — %s",
+                episode_id,
+                removed,
+                [s.get("master_text", "")[:40] for s in segments
+                 if any(p in s.get("master_text", "") for p in self._watermark_patterns)],
+            )
+        return filtered
 
     def _format_segments(self, segments: list[dict]) -> str:
         """
@@ -496,12 +521,14 @@ class EpisodeRefiner:
 
 
 def _merge_artifact_fragments(srt_text: str) -> str:
-    """Merge consecutive identical subtitle blocks where either block is under 200 ms.
+    """Merge consecutive identical subtitle blocks that are artifact duplicates.
 
-    Whisper sometimes produces bursts of micro-duplicates (e.g. many sub-100ms
-    "你" fragments from a confrontation scene) that survive LLM refinement.
-    This deterministic pass collapses adjacent identical blocks by keeping the
-    earliest start and latest end timestamp, then renumbers the sequence.
+    Two conditions trigger a merge:
+    - Either block is under 200 ms (micro-duplicate burst from Whisper), OR
+    - The gap between the blocks is ≤ 3 seconds (same line repeated with pause,
+      e.g. Whisper emitting "继续讨论" twice at 52.8 s and 54.5 s for one utterance).
+
+    Keeps the earliest start and latest end timestamp, then renumbers.
     """
     blocks: list[list[str]] = []
     for raw in re.split(r'\n\n+', srt_text.strip()):
@@ -528,7 +555,8 @@ def _merge_artifact_fragments(srt_text: str) -> str:
         while j < len(blocks):
             n_start, n_end, n_text = blocks[j]
             n_dur = _ms(n_end) - _ms(n_start)
-            if n_text == text and (dur < 200 or n_dur < 200):
+            gap_ms = _ms(n_start) - _ms(end)
+            if n_text == text and (dur < 200 or n_dur < 200 or gap_ms <= 3000):
                 end = n_end
                 dur = _ms(end) - _ms(start)
                 j += 1

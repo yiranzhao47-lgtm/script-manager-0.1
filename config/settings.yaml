@@ -14,6 +14,13 @@ same_lang:
     model: "large-v3"       # stable-whisper model name
     device: "cuda"          # "cuda" | "cpu"
     compute_type: "float16" # faster-whisper precision: "float16" | "int8" | "float32"
+    watermark_patterns:     # platform intro/outro phrases to suppress (add per-show keywords)
+      - "优优"
+      - "YoYo Television"
+      - "独播剧场"
+      - "明镜"
+      - "欢迎订阅"
+      - "请不吝点赞"
   ocr:
     fps: 2                  # frames per second sampled for OCR
     roi: [0.602, 0.6933]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)

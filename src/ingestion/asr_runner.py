@@ -150,6 +150,7 @@ class ASRRunner:
             "master" if mode == "same_lang"
             else asr_cfg.get("role", "semantic_anchor")
         )
+        self._watermark_patterns: list[str] = asr_cfg.get("watermark_patterns", [])
 
         cache_root = Path(cfg["paths"]["cache_dir"])
         self._cache_dir = cache_root / "asr"
@@ -261,6 +262,27 @@ class ASRRunner:
                 _SEG_MAX_DURATION_SEC,
                 [(round(s.end - s.start, 1), repr(s.text[:30])) for s in long_segs],
             )
+
+        # ── Watermark keyword filter ──────────────────────────────────────
+        # Platform intros/outros appear as short-duration segments (< 8 s)
+        # so the duration filter above misses them.  Filter by keyword list
+        # configured in settings.yaml under asr.watermark_patterns.
+        if self._watermark_patterns:
+            wm_segs = [
+                s for s in segments
+                if any(p in s.text for p in self._watermark_patterns)
+            ]
+            if wm_segs:
+                segments = [
+                    s for s in segments
+                    if not any(p in s.text for p in self._watermark_patterns)
+                ]
+                logger.warning(
+                    "[%s] %d watermark segment(s) removed — %s",
+                    episode_id,
+                    len(wm_segs),
+                    [(round(s.end - s.start, 1), repr(s.text[:30])) for s in wm_segs],
+                )
 
         return segments
 
