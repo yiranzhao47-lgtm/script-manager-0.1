@@ -14,7 +14,29 @@ TRANSLATION RULES:
 1. Return a JSON array with the EXACT SAME number of elements as the input. NEVER add, remove, or merge entries.
 2. Each element: {"idx": <same integer as input>, "text": "<English translation>"}
 3. Character names: ALWAYS use the English name from CHARACTER NAME MAPPING. If a name is not in the map, romanize it as-is.
-4. Every sentence starts with a capital letter and ends with . or ! or ? — never omit terminal punctuation.
+4. SENTENCE BOUNDARIES — determine whether each entry is a complete sentence or a fragment BEFORE assigning punctuation.
+
+   • COMPLETE SENTENCE (grammatically self-contained): capitalize first word + end with . or ! or ?
+   • FRAGMENT / CONTINUATION (part of a sentence that spans multiple subtitle entries):
+     - Opening fragment: capitalize first word + NO terminal punctuation (leave bare — no period)
+     - Continuation entry: lowercase first word (it continues the sentence from the previous entry);
+       add ? or ! only if THIS entry is the question/exclamation close of the whole sentence
+
+   HOW TO SPOT A FRAGMENT:
+   - Bare verb phrase whose subject or verb is in the PREVIOUS entry (e.g., 把公司打包送人 after 你这是准备)
+   - Subordinate/adverbial clause starting with 既然 / 因为 / 如果 / 虽然 / 要是
+   - Transitive verb whose object is in the NEXT entry (e.g., 我提议 before 重新匿名竞标)
+
+   TWO-ENTRY SPLIT (question):
+     Input:  ["你这是准备",        "把公司打包送人"]
+     Output: ["Are you planning",  "to give the company away for free?"]
+              ↑ capital, NO period  ↑ lowercase, ends with ? (question close)
+
+   THREE-ENTRY SPLIT (statement):
+     Input:  ["既然大家都不满意",            "那我提议",   "重新匿名竞标"]
+     Output: ["Since no one is satisfied,",  "I propose",  "a new anonymous bid."]
+              ↑ subordinate clause + comma    ↑ bare verb   ↑ closes the sentence with .
+
 5. Translate faithfully — do NOT condense, paraphrase, or editorialize. Every statement, question, threat, and exclamation must be preserved.
 6. Keep each subtitle as a single line (no newline characters \n inside the text value).
 7. Preserve the emotional register: shouting stays sharp, pleading stays gentle, sarcasm stays biting.

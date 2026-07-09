@@ -48,7 +48,10 @@ SCREEN SAFETY — HARD PHYSICAL LIMITS (enforced by validation code after this c
 - Maximum 120 characters total per subtitle entry.
 - If text is too long: condense the meaning. NEVER drop character names or the core action verb.
 
-Every sentence ends with . or ! or ? Always.
+TERMINAL PUNCTUATION AND CONTINUATION PRESERVATION:
+- Complete sentences end with . or ! or ?
+- If the skeleton entry has NO terminal punctuation, it is a mid-sentence fragment (the sentence continues in the next entry). PRESERVE the bare ending — do NOT add a period.
+- If the skeleton entry starts with a LOWERCASE letter, it is a continuation of the previous subtitle's sentence. PRESERVE the lowercase — do NOT capitalize the first word.
 
 INPUT (Episode {{ episode_number }}):
 {{ segments_json }}
