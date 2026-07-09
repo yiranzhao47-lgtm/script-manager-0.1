@@ -1,6 +1,6 @@
 # cc_script_manager — 短剧字幕自动化流水线
 
-> **80集全量测试通过（胜爱情战争）** · 双轨多语言翻译矩阵 · 检查点断点续传 · DeepSeek + Claude API 驱动
+> **80集全量测试通过（胜爱情战争）** · 双轨多语言翻译矩阵（EN / FR / ES）· 付费墙战略报告 · 检查点断点续传 · DeepSeek + Claude API 驱动
 
 ---
 
@@ -69,6 +69,17 @@
      └────────────────────────────────────────────────────┘
            │  输出: data/output/translations/{ep}_{lang}.srt
            │         data/meta/char_name_en_override.json
+           │
+     Stage 7 ─ Paywall Report (可选，python pipeline.py --paywall-report)
+           │
+     ┌─────┴─────────────────────────────────────────────┐
+     │  src/intelligence/                                 │
+     │    paywall_strategist.py — 读 drama_structure_graph.json + Claude │
+     │  config/prompts/                                   │
+     │    paywall_strategy.j2   — 总制片人角色，自主推演卡点  │
+     └────────────────────────────────────────────────────┘
+           │  输出: data/output/paywall_strategy_report.md
+           │         data/output/cost_report_paywall.json
 ```
 
 | 层次 | 关键文件 | 职责 |
@@ -77,10 +88,10 @@
 | 摄取 | `asr_runner.py` | stable-whisper large-v3，逐集转录，GPU scope 保护 |
 | 摄取 | `ocr_runner.py` | PaddleOCR，动态 ROI，动态 FPS，逐帧缓存 JSON |
 | 摄取 | `ocr_dedup.py` | 相似度合并帧序列 → 字幕时间段（cross_lang 专用） |
-| 对齐 | `overlap_aligner.py` | 双条件时间重叠打分，输出统一对齐 JSON；ASR 稀疏时自动升格 OCR 为 master |
+| 对齐 | `overlap_aligner.py` | 双条件时间重叠打分，输出统一对齐 JSON；ASR 稀疏时自动升格 OCR 为 master；前导 OCR 救援补录 ASR 未覆盖的开头台词 |
 | 元数据 | `map_phase.py` | 20 集/批 Map LLM，抽取人物 + 别名 + 角色描述 |
 | 元数据 | `reduce_phase.py` | Reduce LLM，同音合并、OCR 手误去重、规范化 |
-| 精修 | `episode_refiner.py` | 两轮 LLM + 幻觉/碎字/滞留三重防御 + 回退 SRT |
+| 精修 | `episode_refiner.py` | 两轮 LLM + 幻觉/碎字/滞留三重防御 + 回退 SRT；`_clip_overlapping_ends()` 后处理消除跨块时间戳重叠 |
 | 校验 | `srt_validator.py` | 5 项纯函数校验，fail-fast，零 I/O |
 | 工具 | `gpu_manager.py` | GPU 序列化看门狗，pynvml 遥测 |
 | 工具 | `checkpoint.py` | 原子状态机，BOM-free JSON |
@@ -88,8 +99,9 @@
 | 工具 | `lang_detector.py` | 帧采样 → CJK 占比预检 |
 | 工具 | `token_counter.py` | tiktoken 估算，超限警告 |
 | 智能 | `rhythm_analyzer.py` | 两阶段 MapReduce 剧情因果链拆分，并行 Map + 单次 Reduce |
-| 智能 | `cost_auditor.py` | FinOps 核算：按模块分类 token 用量，输出 CNY 成本表 |
-| 翻译 | `translation_matrix.py` | 双轨多语言翻译矩阵：DeepSeek 骨架 + Claude 润色 + 多语言并发 |
+| 智能 | `cost_auditor.py` | FinOps 核算：按模块分类 token 用量，输出 CNY 成本表；`cfg_key` 参数支持 DeepSeek / Claude 独立计费 |
+| 智能 | `paywall_strategist.py` | 读取 drama_structure_graph.json，由 Claude 自主推演付费墙卡点 + 营销素材剪辑建议 |
+| 翻译 | `translation_matrix.py` | 双轨多语言翻译矩阵：DeepSeek 骨架 + Claude 润色 + 多语言并发（EN / FR / ES 默认开启） |
 | 工具 | `scripts/reset_checkpoint.py` | 安全回滚单集检查点状态（Python，无 BOM 风险） |
 
 ### 1.2　Strategy 模式：一个开关驱动两套行为
@@ -403,6 +415,27 @@ same_lang:
     asr_sparse_rescue: true       # 默认开启；设 false 可禁用救援
     asr_min_segments: 10          # 低于此段数且 OCR≥5 时触发
 ```
+
+### 防御 7b　前导 OCR 救援（Leading OCR Rescue）
+
+**文件：** `src/alignment/overlap_aligner.py` — `_align_same_lang()`
+
+**问题（ep02 实测）：** Whisper 在 BGM 较强的片头段落（0–33 s）未转录任何语音，第一个 ASR segment 从 33.22s 开始。但 OCR 在 16–24s 正确捕获了 4 条台词（`林总监`、`我们说好了啊`、`不把工作情绪带到床上`、`白天架还没吵够啊`）。这些 OCR blocks 没有任何 ASR anchor，被 ASR-as-master 循环完全丢弃，导致前 33s 字幕缺失。
+
+ASR 稀疏救援（防御 7）**无法覆盖此场景**：ep02 共有 47 个 ASR segments，远超 `asr_min_segments: 10` 阈值，不触发整集翻转。
+
+**算法：** 在 ASR-as-master 主循环**之前**，扫描所有在第一个 ASR segment 开始时间 1s 前结束的 OCR blocks，以 `master_source="ocr_leading"` 升格为对齐段，前置追加到结果列表。
+
+```python
+first_asr_start = asr_segs[0]["start"]
+cutoff = first_asr_start - 1.0   # 1s 安全边距，避免与第一个 ASR 段重叠
+leading = [b for b in ocr_blocks if b["end"] <= cutoff]
+if leading:
+    leading = self._dedup_rescue_blocks(leading, episode_id)
+    # 升格为 AlignedSegment，master_source="ocr_leading"，context_available=False
+```
+
+**效果：** ep02 第一条字幕从 `00:00:33,220` 提前到 `00:00:16,520`，4 条开头台词全部恢复。
 
 ### 防御 8　OCR 救援路径同语言去重
 
@@ -827,11 +860,19 @@ pricing:
 
 切换模型只需将 `execution.llm.model` 与 `pricing` 下同名 key 对应即可；模型名不匹配时成本列显示 ¥0.0000 并记录 WARNING。
 
-#### 输出文件（data/output/cost_report.json）
+#### 输出文件
+
+`CostAuditor` 的 `cfg_key` + `report_filename` 参数支持多客户端独立计费，不同调用点写入不同文件：
+
+| 文件 | 来源 | 定价 key |
+|------|------|---------|
+| `data/output/cost_report_deepseek.json` | 主流水线 Stage 3-5（DeepSeek） | `deepseek-chat` |
+| `data/output/cost_report_claude.json` | 翻译矩阵 Claude 润色（EN refine） | `anthropic/claude-sonnet-4-5` |
+| `data/output/cost_report_paywall.json` | `--paywall-report` 付费墙报告 | `anthropic/claude-sonnet-4-5` |
 
 ```json
 {
-  "generated_at": "2026-07-08T01:44:38",
+  "generated_at": "2026-07-09T12:00:00",
   "model": "deepseek-chat",
   "pricing_used": { "input_cost_per_m": 1.0, "output_cost_per_m": 2.0 },
   "by_module": [
@@ -843,6 +884,15 @@ pricing:
   "total": { "input_tokens": 19783, "output_tokens": 1462,
              "calls": 5, "cost_cny": 0.0227 }
 }
+```
+
+Claude 定价配置：
+
+```yaml
+pricing:
+  "anthropic/claude-sonnet-4-5":
+    input_cost_per_m:  21.75    # $3.00/M × ¥7.25/$
+    output_cost_per_m: 108.75   # $15.00/M × ¥7.25/$
 ```
 
 ---
@@ -857,11 +907,11 @@ pricing:
    Step 1 — DeepSeek   ZH → EN 骨架（faithful，保留所有剧情信息）
          │
          ├─ Track A (并发) — Claude    EN 骨架 → EN 润色（US English，移动端观感）
-         └─ Track B (并发) — DeepSeek  EN 骨架 → th / vi / … （小语种，每种一线程）
+         └─ Track B (并发) — DeepSeek  EN 骨架 → fr / es / …（小语种，每种一线程）
+         │                             （默认配置：fr + es；在 settings.yaml target_languages 扩展）
          │
    Step 3 — 代码层校验
-               中文/小语种：≤3 行 / ≤40 字符/行 / ≤140 字符
-               英文（EN）：单行 / ≤120 字符总长
+               英文及小语种（FR / ES 等）：单行 / ≤120 字符总长
                违规 → correction retry → 仍违规 → 截断兜底
          │
    Step 3.5 — 续句首字母修正（_fix_continuation_capitalization）
@@ -931,17 +981,17 @@ for item in arr:
 - TONE BY SCENE TYPE：职场撕逼用直白美式英语，霸总冷场短句，恋爱张力保热度
 - 扩展 Chinglish 替换表："this matter / truly / let me tell you / not good" 等
 
-#### 防御 10　EN 字幕 40 字符截断
+#### 防御 10　EN / 小语种字幕 40 字符截断
 
-**问题：** `_validate_and_correct()` 对所有语言统一使用中文的 40 字符/行规则。英文单行字幕只要超过 40 字符就被标记为违规；LLM 纠错回调仍超长时，`_truncate_to_limits` 在第 40 个字符处硬截断，产生半句话（如 `"Fanshi's quote is inflated by thirty per"`）。
+**问题：** `_validate_and_correct()` 对所有语言统一使用中文的 40 字符/行规则。英文及法语、西语等单行字幕只要超过 40 字符就被标记为违规；LLM 纠错回调仍超长时，`_truncate_to_limits` 在第 40 个字符处硬截断，产生半句话（如 `"Fanshi's quote is inflated by thirty per"`）。FR 首次运行 14/42 违规，ES 6/42 违规。
 
-**修复：** `_validate_and_correct()` 新增可选参数 `screen_check` / `truncate_fn`。
+**修复：** `_validate_and_correct()` 新增可选参数 `screen_check` / `truncate_fn`；`translate_minor_lang.j2` prompt 更新约束。
 
 | 调用点 | 校验规则 |
 |--------|---------|
 | `_step1_skeleton()`（DeepSeek） | 无 `\n`，总长 ≤ 120 字符 |
 | `_step2a_refine_en()`（Claude） | 同上；截断函数合并换行后取前 120 字符 |
-| 中文 / 小语种（默认） | 原有 ≤40 字符/行规则不变 |
+| `_step2b_minor_lang()`（FR / ES / …） | 同上：单行 ≤ 120 字符；原中文 40 字符/行规则**不**适用于拉丁文字语种 |
 
 `_fill_missing_refined()` 的 retry prompt 也同步更新为 "single line, max 120 chars"。
 
@@ -967,6 +1017,26 @@ for item in arr:
 
 - **生效范围**：`_emit_srts()` 中执行（覆盖现有 80 集缓存，**无需重跑 LLM**）；同时在 `run_episode()` 的 skeleton 传给 Claude 前执行（改善 Claude 收到的输入质量）。
 - **ep02 验证**：4 对续句全部修正，独立完整句（如 "Jiecheng's products are substandard."）零误判。
+
+#### 防御 12　SRT 跨块时间戳重叠修剪
+
+**文件：** `src/execution/episode_refiner.py` — `_clip_overlapping_ends()`
+
+**问题：** OCR 帧聚合时 block 的 end 被设为 `frame_time + interval`（interval = 0.5s @2fps）。当字幕切换恰好发生在非整帧时刻，下一个 block 的 start 会比上一个 block 的 end 早 ~20ms，产生跨块时间戳重叠（`block[N].end > block[N+1].start`）。这类重叠在 OCR-as-master（ASR 稀疏救援）模式下直接进入 SRT，且通过了 SRTValidator（后者只检查单 block 内 `end > start`，不检查跨块关系）。ep01 实测 9 处重叠，全为 20ms 级别。
+
+**修复（纯后处理，不改缓存）：**
+
+```python
+def _clip_overlapping_ends(srt_text: str) -> str:
+    # 解析所有 block 的 end/next_start，若 end > next_start，令 end = next_start
+    for i in range(len(blocks) - 1):
+        if _ms(blocks[i][2]) > _ms(blocks[i + 1][1]):
+            blocks[i][2] = blocks[i + 1][1]
+```
+
+**应用位置：** `refine_episode()` 所有 3 条 SRT 写路径（valid、retry、fallback）均包装在最外层：`_clip_overlapping_ends(_merge_short_fragments(_merge_artifact_fragments(...)))`。
+
+**效果：** ep01 由 9 处重叠 → 0；所有 SRT 写出前自动修剪，无需清缓存重跑 LLM。
 
 #### 覆盖率报告
 
@@ -1003,6 +1073,71 @@ data/cache/translation/
 ```
 
 > **安全规则：** `DEEPSEEK_API_KEY` 与 `OPENROUTER_API_KEY` 只存在于环境变量，绝不写入任何文件。
+
+---
+
+## 第六章　Stage 7 Paywall Report — AI 付费墙战略报告
+
+### 6.1　功能概述
+
+```powershell
+# 前提：已完成 Stage 5 Intelligence（drama_structure_graph.json 存在）
+$env:OPENROUTER_API_KEY = "your_openrouter_key"
+python pipeline.py --paywall-report
+```
+
+**输出：** `data/output/paywall_strategy_report.md` — 一份《AI 智能驱动型付费墙战略与买量剪辑评估报告》
+
+### 6.2　架构
+
+```
+drama_structure_graph.json
+         │
+         ├─ macro_blueprint（去除 debt_chain_narrative，控制 token）
+         │     first_pinch / second_pinch / marketing_clips / post_first_pinch_flow
+         │
+         ├─ debt_chain_narrative（全剧因果债综述，独立字段）
+         │
+         └─ episode_conflicts（ep01-25 压缩版 scene 明细）
+               保留：scene_id / scene_actions / unresolved_debt / pivot_signals
+               丢弃：location / time / structured_dialogues（节省 ~60% tokens）
+                        │
+              渲染 paywall_strategy.j2（Jinja2）
+                        │
+              Claude（via OpenRouter）单次调用
+                        │
+              输出 Markdown 报告
+```
+
+**token 用量估算：** macro_blueprint ~6K chars + debt_chain ~4K + ep01-25 scenes ~14K ≈ 24K chars 输入，约 6000-8000 input tokens；输出约 2000 tokens。每次调用成本约 ¥0.40-0.60（`anthropic/claude-sonnet-4-5` @¥7.25/$）。
+
+### 6.3　Claude 自主推演设计
+
+`paywall_strategy.j2` 赋予 Claude 总制片人兼全球增长投放总监角色，**主动反对死板公式**：
+
+- `macro_blueprint` 中的 `first_pinch` / `second_pinch` 为 AI 初步参考，Claude 可自主推翻
+- 要求完全基于叙事张力、情感钩子、悬念峰值推演最优卡点，而非固定"每 X 集设卡"
+- 必须额外从 `episode_scenes` 中发掘 2-3 个 `marketing_clips` 中漏标的高能素材点，最终 ≥6 条剪辑建议
+
+**《胜爱情战争》实测结果：**
+
+| 卡点 | Claude 推演 | 理由摘要 |
+|------|------------|---------|
+| 一卡 | 第 19 集设卡，第 20 集付费 | 信任崩塌节点：林展虹质问"你违背了我们的约定"，双线悬念峰值 |
+| 二卡 | 第 49 集设卡，第 50 集付费 | 情感终极抉择前夜，陆子谦三角竞争格局 vs 林展虹"我选择了你" |
+| 卡间距 | 30 集 | 超行业标准 12-15 集，但符合双线并行叙事节奏，建议 ep30-40 插入微付费点 |
+
+### 6.4　FR / ES 小语种默认配置
+
+**settings.yaml：**
+```yaml
+intelligence:
+  translation:
+    enabled: true
+    target_languages: ["fr", "es"]   # 默认与 EN 同步输出法语 + 西语
+```
+
+新增语种只需向数组追加 ISO 639-1 代码（如 `"th"`、`"vi"`），无需改代码。每种语言在 Step 2B 各启动一个独立线程，与 Claude EN 润色并发执行。
 
 ---
 
