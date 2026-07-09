@@ -81,7 +81,16 @@ class PaywallStrategist:
         macro_ref    = {k: v for k, v in macro.items() if k != "debt_chain_narrative"}
         episode_scenes = self._extract_compressed_scenes(graph)
 
-        prompt = self._render_prompt(drama_title, debt_chain, macro_ref, episode_scenes)
+        first_pinch  = macro.get("first_pinch", {})
+        second_pinch = macro.get("second_pinch", {})
+        fp_ep = self._extract_ep_num(first_pinch.get("target_scene_id", ""))
+        sp_ep = self._extract_ep_num(second_pinch.get("target_scene_id", ""))
+
+        prompt = self._render_prompt(
+            drama_title, debt_chain, macro_ref, episode_scenes,
+            first_pinch_ep=fp_ep,
+            second_pinch_ep=sp_ep,
+        )
         system = (
             "You are a senior international short-drama executive producer "
             "and global growth director with deep expertise in narrative arc "
@@ -152,12 +161,21 @@ class PaywallStrategist:
     #  Prompt rendering                                                    #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _extract_ep_num(scene_id: str) -> int | None:
+        """Extract episode number from scene_id e.g. 'ep12_sc_01' → 12."""
+        import re
+        m = re.match(r"ep(\d+)", scene_id or "")
+        return int(m.group(1)) if m else None
+
     def _render_prompt(
         self,
         drama_title: str,
         debt_chain: str,
         macro_ref: dict,
         episode_scenes: list[dict],
+        first_pinch_ep: int | None = None,
+        second_pinch_ep: int | None = None,
     ) -> str:
         tmpl = self._jinja.get_template("paywall_strategy.j2")
         return tmpl.render(
@@ -165,4 +183,8 @@ class PaywallStrategist:
             debt_chain_narrative=debt_chain,
             macro_blueprint_json=json.dumps(macro_ref, ensure_ascii=False, indent=2),
             episode_scenes_json=json.dumps(episode_scenes, ensure_ascii=False, indent=2),
+            first_pinch_ep=first_pinch_ep,
+            first_pay_ep=(first_pinch_ep + 1) if first_pinch_ep else None,
+            second_pinch_ep=second_pinch_ep,
+            second_pay_ep=(second_pinch_ep + 1) if second_pinch_ep else None,
         )
