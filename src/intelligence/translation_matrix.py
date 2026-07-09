@@ -488,9 +488,13 @@ class TranslationMatrix:
             system=system, user=user, module_name=f"Translation_{lang.upper()}"
         )
         result_arr = self._parse_translation_array(raw, len(input_arr), ep_id, lang)
+        # Use EN-style single-line limits (≤120 chars, no \n) — Romance languages
+        # average 20-30% longer than Chinese and overflow the ZH 40-char/line rule.
         result_arr = self._validate_and_correct(
             result_arr, ep_id, lang, self.llm_ds,
-            lambda violations: self._render_screen_correction(ep_id, input_arr, violations, result_arr, lang_name),
+            lambda violations: self._render_single_line_correction(ep_id, input_arr, violations, result_arr, lang_name),
+            screen_check=lambda text: "\n" not in text and len(text) <= 120,
+            truncate_fn=lambda text: text.replace("\n", " ")[:120].rstrip(),
         )
         return [item.get("text", "") for item in result_arr]
 
@@ -593,6 +597,36 @@ class TranslationMatrix:
             f"Episode {ep_id} — {lang_name} subtitle correction.\n"
             f"The following entries exceed screen limits (max 3 lines, max 40 chars/line, max 140 chars total).\n"
             f"Rewrite ONLY these entries to fit within the limits. Preserve the meaning.\n"
+            f"Return a JSON array of ONLY the fixed entries with their original idx values.\n\n"
+            f"{json.dumps(bad, ensure_ascii=False, indent=2)}"
+        )
+        system = f"You are a professional subtitle editor ensuring screen safety for {lang_name} subtitles."
+        return system, user
+
+    @staticmethod
+    def _render_single_line_correction(
+        ep_id: str,
+        input_arr: list[dict],
+        violations: list[int],
+        prev_result: list[dict],
+        lang_name: str,
+    ) -> tuple[str, str]:
+        bad = [
+            {
+                "idx": v,
+                "source_en": input_arr[v]["text"] if v < len(input_arr) else "",
+                "bad_translation": prev_result[v].get("text", "") if v < len(prev_result) else "",
+                "violation": (
+                    f"contains \\n" if "\n" in prev_result[v].get("text", "")
+                    else f"total={len(prev_result[v].get('text', ''))} chars (max 120)"
+                ),
+            }
+            for v in violations
+        ]
+        user = (
+            f"Episode {ep_id} — {lang_name} subtitle correction.\n"
+            f"The following entries must be a SINGLE LINE (no \\n) with at most 120 characters total.\n"
+            f"Condense or rephrase to fit. Preserve the core meaning and emotional tone.\n"
             f"Return a JSON array of ONLY the fixed entries with their original idx values.\n\n"
             f"{json.dumps(bad, ensure_ascii=False, indent=2)}"
         )
