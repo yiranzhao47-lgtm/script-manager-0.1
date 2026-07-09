@@ -7,7 +7,7 @@ Architecture (per episode):
   Step 2B DeepSeek  en_skeleton → th / vi / … (concurrent, one call per language)
   Step 3  Validate  code-layer ≤3 lines / ≤40 chars / ≤140 total + correction retry
   Step 4  Write     data/cache/translation/{ep}_translation.json
-                    data/output/translations/{ep}_{lang}.srt
+                    data/output/translations/{lang}/{ep}_{lang}.srt
 
 Entry points
 ────────────
@@ -853,7 +853,7 @@ class TranslationMatrix:
             return json.load(f)
 
     def _emit_srts(self, ep_id: str, cache_data: dict) -> None:
-        """Write one SRT file per output language to data/output/translations/."""
+        """Write one SRT file per output language to data/output/translations/{lang}/."""
         segs = cache_data.get("segments", [])
         en_texts = [s.get("en_refined") or s.get("en_skeleton", "") for s in segs]
         en_texts = self._fix_continuation_capitalization(en_texts, segs)
@@ -878,7 +878,9 @@ class TranslationMatrix:
         texts: list[str],
         segs: list[dict],
     ) -> None:
-        srt_path = self._trans_out / f"{ep_id}_{lang}.srt"
+        lang_dir = self._trans_out / lang
+        lang_dir.mkdir(parents=True, exist_ok=True)
+        srt_path = lang_dir / f"{ep_id}_{lang}.srt"
         blocks: list[str] = []
         counter = 1
         for text, seg in zip(texts, segs):
