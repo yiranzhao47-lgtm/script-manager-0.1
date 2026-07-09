@@ -859,8 +859,14 @@ pricing:
          ├─ Track A (并发) — Claude    EN 骨架 → EN 润色（US English，移动端观感）
          └─ Track B (并发) — DeepSeek  EN 骨架 → th / vi / … （小语种，每种一线程）
          │
-   Step 3 — 代码层校验：每条字幕 ≤3 行 / ≤40 字符/行 / ≤140 字符
+   Step 3 — 代码层校验
+               中文/小语种：≤3 行 / ≤40 字符/行 / ≤140 字符
+               英文（EN）：单行 / ≤120 字符总长
                违规 → correction retry → 仍违规 → 截断兜底
+         │
+   Step 3.5 — 续句首字母修正（_fix_continuation_capitalization）
+               中文句子分两条字幕时，LLM 对每条独立大写首字母
+               → 检测续句模式 → 去除前条伪句号 + 后条首字母小写
          │
    Step 4 — 写入翻译缓存 + 输出 SRT
          │
@@ -924,6 +930,43 @@ for item in arr:
 - 单行输出，禁止 `\n`（播放器自动换行）；代码层二次剥除保底
 - TONE BY SCENE TYPE：职场撕逼用直白美式英语，霸总冷场短句，恋爱张力保热度
 - 扩展 Chinglish 替换表："this matter / truly / let me tell you / not good" 等
+
+#### 防御 10　EN 字幕 40 字符截断
+
+**问题：** `_validate_and_correct()` 对所有语言统一使用中文的 40 字符/行规则。英文单行字幕只要超过 40 字符就被标记为违规；LLM 纠错回调仍超长时，`_truncate_to_limits` 在第 40 个字符处硬截断，产生半句话（如 `"Fanshi's quote is inflated by thirty per"`）。
+
+**修复：** `_validate_and_correct()` 新增可选参数 `screen_check` / `truncate_fn`。
+
+| 调用点 | 校验规则 |
+|--------|---------|
+| `_step1_skeleton()`（DeepSeek） | 无 `\n`，总长 ≤ 120 字符 |
+| `_step2a_refine_en()`（Claude） | 同上；截断函数合并换行后取前 120 字符 |
+| 中文 / 小语种（默认） | 原有 ≤40 字符/行规则不变 |
+
+`_fill_missing_refined()` 的 retry prompt 也同步更新为 "single line, max 120 chars"。
+
+#### 防御 11　EN 续句首字母大写
+
+**问题：** 中文一句话被切成两条字幕条目时（常见于问句"你是不是打算 / 把公司打包送人"），LLM 独立翻译每条，自动对每条首字母大写并加句号：
+
+```
+8   Are you planning.           ← 伪句号（前半句）
+9   To give the company away for free?   ← 首字母错误大写（续句）
+```
+
+本剧台词不用 `。` 结尾，基于中文标点的探测误报率极高，因此**完全基于英文输出**检测续句：
+
+| 条件 | 说明 |
+|------|------|
+| 前条以 `"."` 结尾 | LLM 为不完整分句加的伪句号 |
+| 后条以 `"To [动词]"` 开头（排除 `"To be"`）或否定缩略（`Isn't` / `Don't` / `Can't` 等） | 只在续句位置出现的起始模式 |
+| 后条以 `"?"` 或 `"!"` 结尾 | 闭合整句的终止标点 |
+| 两条时间间隔 ≤ 500ms | 同气口，排除不同说话人快速交替 |
+
+**修复：** `_fix_continuation_capitalization()` — 去除前条伪句号，后条首字母小写。
+
+- **生效范围**：`_emit_srts()` 中执行（覆盖现有 80 集缓存，**无需重跑 LLM**）；同时在 `run_episode()` 的 skeleton 传给 Claude 前执行（改善 Claude 收到的输入质量）。
+- **ep02 验证**：4 对续句全部修正，独立完整句（如 "Jiecheng's products are substandard."）零误判。
 
 #### 覆盖率报告
 
