@@ -122,7 +122,11 @@ intelligence:
     genre_glossary_path: "data/meta/fantasy_glossary.json"  # optional; silently skipped if missing
 
 # ── FinOps pricing (unit: CNY / million tokens) ───────────────────────────────
+# Claude rates assume ¥7.25/USD; update if exchange rate shifts significantly.
 pricing:
   deepseek-chat:
     input_cost_per_m:  1.0        # ¥1.00 per 1 M input tokens
     output_cost_per_m: 2.0        # ¥2.00 per 1 M output tokens
+  "anthropic/claude-sonnet-4-5":
+    input_cost_per_m:  21.75      # $3.00/M × ¥7.25/$ (via OpenRouter)
+    output_cost_per_m: 108.75     # $15.00/M × ¥7.25/$ (via OpenRouter)

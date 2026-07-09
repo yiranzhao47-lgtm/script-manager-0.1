@@ -205,7 +205,9 @@ class ShortDramaPipeline:
 
         # ── FinOps: emit cost report ───────────────────────────────────────
         from src.intelligence.cost_auditor import CostAuditor
-        CostAuditor(self._llm, output_dir=self._output_dir).emit_financial_report(self._cfg)
+        CostAuditor(self._llm, output_dir=self._output_dir).emit_financial_report(
+            self._cfg, cfg_key="llm", report_filename="cost_report_deepseek.json"
+        )
 
     # ------------------------------------------------------------------ #
     #  Episode discovery                                                   #
@@ -713,13 +715,17 @@ def _run_translation_only(cfg: dict, episode_filter: Optional[list[str]] = None)
     matrix = TranslationMatrix(cfg)
     matrix.run_all(episode_ids)
 
-    # FinOps: report costs for both LLM clients
+    # FinOps: report costs for both LLM clients using their own pricing entries
     logger.info("─── FinOps: DeepSeek (skeleton + minor langs) ───")
-    CostAuditor(matrix.llm_ds, output_dir=output_dir).emit_financial_report(cfg)
+    CostAuditor(matrix.llm_ds, output_dir=output_dir).emit_financial_report(
+        cfg, cfg_key="llm", report_filename="cost_report_deepseek.json"
+    )
 
     if matrix.llm_claude is not matrix.llm_ds:
         logger.info("─── FinOps: Claude (English refinement) ───")
-        CostAuditor(matrix.llm_claude, output_dir=output_dir).emit_financial_report(cfg)
+        CostAuditor(matrix.llm_claude, output_dir=output_dir).emit_financial_report(
+            cfg, cfg_key="llm_claude", report_filename="cost_report_claude.json"
+        )
 
     logger.info(
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

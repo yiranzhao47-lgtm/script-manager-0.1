@@ -58,19 +58,31 @@ class CostAuditor:
     #  Public                                                              #
     # ------------------------------------------------------------------ #
 
-    def emit_financial_report(self, config: dict) -> None:
+    def emit_financial_report(
+        self,
+        config: dict,
+        cfg_key: str = "llm",
+        report_filename: str = "cost_report.json",
+    ) -> None:
         """
         Pull usage data from the LLMClient ledger, compute costs, print the
-        terminal dashboard, and persist ``cost_report.json``.
+        terminal dashboard, and persist a JSON cost report.
 
         Parameters
         ----------
         config:
             Parsed ``config/settings.yaml`` dict.  Must contain a ``pricing``
-            top-level key and an ``execution.llm.model`` key.
+            top-level key and an ``execution.<cfg_key>.model`` key.
+        cfg_key:
+            Sub-key under ``execution`` that identifies this client's model and
+            pricing.  Use ``"llm"`` for DeepSeek (default) and ``"llm_claude"``
+            for the Claude/OpenRouter client.
+        report_filename:
+            Name of the JSON file written to ``output_dir``.  Separate filenames
+            prevent multiple auditor calls from overwriting each other.
         """
         ledger  = self._llm.get_ledger_data()
-        model   = config.get("execution", {}).get("llm", {}).get("model", "unknown")
+        model   = config.get("execution", {}).get(cfg_key, {}).get("model", "unknown")
         pricing = config.get("pricing", {}).get(model, {})
 
         in_rate  = float(pricing.get("input_cost_per_m",  0.0))
@@ -87,7 +99,7 @@ class CostAuditor:
         total_cost  = _calc_cost(total_usage, in_rate, out_rate)
 
         self._print_dashboard(model, rows, total_usage, total_cost)
-        self._write_json_report(config, model, rows, total_usage, total_cost)
+        self._write_json_report(config, model, rows, total_usage, total_cost, report_filename)
 
     # ------------------------------------------------------------------ #
     #  Row construction                                                    #
@@ -177,9 +189,10 @@ class CostAuditor:
         rows: list[dict],
         total: dict,
         total_cost: float,
+        filename: str = "cost_report.json",
     ) -> None:
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        out_path = self._output_dir / "cost_report.json"
+        out_path = self._output_dir / filename
 
         payload = {
             "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
