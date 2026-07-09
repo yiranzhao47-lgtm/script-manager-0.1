@@ -281,9 +281,12 @@ class TranslationMatrix:
         result_arr = self._parse_translation_array(raw, len(segs), ep_id, "skeleton")
 
         # Correction retry if screen constraint violations detected
+        # Use EN-specific limits (single line, ≤120 chars) — NOT the ZH 40-char/line rule
         result_arr = self._validate_and_correct(
             result_arr, ep_id, "skeleton (EN)", self.llm_ds,
             lambda violations: self._render_skeleton_correction(ep_id, input_arr, violations, result_arr),
+            screen_check=lambda text: "\n" not in text and len(text) <= 120,
+            truncate_fn=lambda text: text.replace("\n", " ")[:120].rstrip(),
         )
 
         # Fill any entries that are still empty after idx-scatter + screen correction
@@ -380,6 +383,8 @@ class TranslationMatrix:
         result_arr = self._validate_and_correct(
             result_arr, ep_id, "en_refined", self.llm_claude,
             lambda violations: self._render_screen_correction(ep_id, input_arr, violations, result_arr, "English"),
+            screen_check=lambda text: "\n" not in text and len(text) <= 120,
+            truncate_fn=lambda text: text.replace("\n", " ")[:120].rstrip(),
         )
         result_arr = self._fill_missing_refined(result_arr, input_arr, ep_id)
 
@@ -423,7 +428,7 @@ class TranslationMatrix:
         user = (
             f"Episode {ep_id}: Polish these English subtitle entries. "
             f"Each input must produce exactly ONE polished output — never merge entries. "
-            f"Max 3 lines, 40 chars/line, 140 chars total. "
+            f"Single line only (no \\n), max 120 characters total. "
             f"Return ONLY a JSON array of {{\"idx\": <int>, \"text\": \"<polished>\"}} objects.\n\n"
             f"{json.dumps(retry_input, ensure_ascii=False, indent=2)}"
         )
@@ -483,15 +488,23 @@ class TranslationMatrix:
         lang_label: str,
         client,
         make_correction_prompt,
+        screen_check=None,
+        truncate_fn=None,
     ) -> list[dict]:
         """
         Check each element against screen safety constraints.
         Trigger one correction retry for violating entries.
         Fallback: truncate if correction still fails.
+
+        screen_check: callable(text) -> bool; defaults to _check_screen_limits (CJK 40-char/line)
+        truncate_fn:  callable(text) -> str;  defaults to self._truncate_to_limits
         """
+        check = screen_check if screen_check is not None else _check_screen_limits
+        trunc = truncate_fn if truncate_fn is not None else self._truncate_to_limits
+
         violations = [
             i for i, item in enumerate(result_arr)
-            if not _check_screen_limits(item.get("text", ""))
+            if not check(item.get("text", ""))
         ]
         if not violations:
             return result_arr
@@ -530,10 +543,10 @@ class TranslationMatrix:
         # Final pass: truncate anything still over limit
         still_bad = [
             i for i in violations
-            if not _check_screen_limits(result_arr[i].get("text", ""))
+            if not check(result_arr[i].get("text", ""))
         ]
         for i in still_bad:
-            result_arr[i]["text"] = self._truncate_to_limits(result_arr[i].get("text", ""))
+            result_arr[i]["text"] = trunc(result_arr[i].get("text", ""))
 
         return result_arr
 
