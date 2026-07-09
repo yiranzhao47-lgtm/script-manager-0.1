@@ -125,6 +125,7 @@ class LangDetector:
 
     def __init__(self, cfg: dict, video_dir: Path) -> None:
         self._mode: str = cfg["pipeline"]["mode"]
+        self._source_language: str = cfg["pipeline"].get("source_language", "zh")
 
         ld = cfg.get("lang_detection", {})
         self._n_episodes: int = ld.get("episodes_to_check", 3)
@@ -136,7 +137,8 @@ class LangDetector:
         ocr_cfg = cfg.get(self._mode, {}).get("ocr", {})
         roi = ocr_cfg.get("roi", [0.80, 0.95])
         self._roi: tuple[float, float] = (float(roi[0]), float(roi[1]))
-        self._ocr_lang: str = "ch" if self._mode == "same_lang" else "en"
+        # Use source_language to select OCR model; "ch" is PaddleOCR's Chinese code
+        self._ocr_lang: str = "ch" if self._source_language == "zh" else "en"
 
         self._video_dir = Path(video_dir)
         self._ocr: Optional[object] = None  # lazy-initialised on first frame
@@ -366,7 +368,7 @@ class LangDetector:
             "cjk" if report.overall_cjk_ratio >= self._cjk_threshold else "latin"
         )
 
-        expected = "cjk" if self._mode == "same_lang" else "latin"
+        expected = "cjk" if self._source_language == "zh" else "latin"
         report.match = report.detected_dominant == expected
         return report
 

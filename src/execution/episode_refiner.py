@@ -128,6 +128,7 @@ class EpisodeRefiner:
         self._cfg = cfg
         self._meta = meta
         self._mode: str = cfg["pipeline"]["mode"]
+        self._source_language: str = cfg["pipeline"].get("source_language", "zh")
         self._validator = SRTValidator()
         self._jinja = _build_jinja_env()
 
@@ -138,11 +139,18 @@ class EpisodeRefiner:
         out_dir: str = cfg.get("paths", {}).get("output_dir", "data/output")
         self._output_dir = Path(out_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        # Subdir name: "cn" for Chinese source, language code otherwise (e.g. "en")
+        _subdir = "cn" if self._source_language == "zh" else self._source_language
+        self._cn_dir = self._output_dir / _subdir
+        self._cn_dir.mkdir(parents=True, exist_ok=True)
         self._report_path = self._output_dir / "validation_report.json"
 
         prompts_cfg = cfg.get("execution", {}).get("prompts", {})
         if self._mode == "same_lang":
-            self._prompt_name = prompts_cfg.get("same_lang", "refine_same_lang.j2")
+            if self._source_language == "en":
+                self._prompt_name = prompts_cfg.get("same_lang_en", "refine_en_same_lang.j2")
+            else:
+                self._prompt_name = prompts_cfg.get("same_lang", "refine_same_lang.j2")
         else:
             self._prompt_name = prompts_cfg.get("cross_lang", "refine_cross_lang.j2")
 
@@ -168,7 +176,7 @@ class EpisodeRefiner:
         src_path = Path(episode_json_path)
         episode_id = src_path.stem.replace("_aligned", "")
 
-        out_path = self._output_dir / f"{episode_id}.srt"
+        out_path = self._cn_dir / f"{episode_id}.srt"
         if out_path.exists():
             logger.info("EpisodeRefiner: %s cache hit — skipped", episode_id)
             return str(out_path)
@@ -330,6 +338,12 @@ class EpisodeRefiner:
 
     def _system_prompt(self) -> str:
         if self._mode == "same_lang":
+            if self._source_language == "en":
+                return (
+                    "You are a professional English subtitle editor. "
+                    "Output ONLY a valid SRT file — no prose, no markdown code fences, "
+                    "no explanations before or after the SRT."
+                )
             return (
                 "You are a professional Chinese subtitle editor. "
                 "Output ONLY a valid SRT file — no prose, no markdown code fences, "
@@ -423,7 +437,7 @@ class EpisodeRefiner:
         even if the content is unrefined.
         """
         fallback_srt = self._assemble_fallback_srt(segments)
-        out_path = self._output_dir / f"{episode_id}.srt"
+        out_path = self._cn_dir / f"{episode_id}.srt"
         _atomic_write(out_path, _clip_overlapping_ends(_merge_short_fragments(_merge_artifact_fragments(fallback_srt))))
 
         self._append_validation_report(episode_id, reason)

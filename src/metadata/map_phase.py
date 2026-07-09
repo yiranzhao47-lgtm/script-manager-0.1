@@ -105,6 +105,7 @@ class MapPhase:
 
     def __init__(self, cfg: dict, llm_client=None) -> None:
         self._mode: str = cfg["pipeline"]["mode"]
+        self._source_language: str = cfg.get("pipeline", {}).get("source_language", "zh")
         self._batch_size: int = int(cfg.get("metadata", {}).get("map_batch_size", 20))
         self._max_chars: int = _DEFAULT_MAX_CHARS
 
@@ -199,10 +200,11 @@ class MapPhase:
         )
         from src.utils.llm_client import extract_json, LLMCallError
 
+        lang_label = "English" if self._source_language == "en" else "Chinese"
         try:
             raw_response = self._llm.complete(
                 system=(
-                    "You are a precise Chinese drama script analyst. "
+                    f"You are a precise {lang_label} drama script analyst. "
                     "Your response must be valid JSON only — no prose, "
                     "no explanations, no markdown."
                 ),
@@ -317,6 +319,7 @@ class MapPhase:
         return template.render(
             batch_index=batch_idx,
             mode=self._mode,
+            source_language=self._source_language,
             episode_range=episode_range,
             text_content=text_content,
         )

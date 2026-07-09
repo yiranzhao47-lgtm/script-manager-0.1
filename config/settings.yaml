@@ -5,8 +5,11 @@
 # ── Global pipeline switch ────────────────────────────────────────────────────
 pipeline:
   mode: "same_lang"         # "same_lang" | "cross_lang"
-                            # same_lang  : Chinese audio + Chinese subtitles (ASR master)
-                            # cross_lang : Chinese audio + English subtitles (OCR master)
+                            # same_lang  : audio language == subtitle language (ASR master)
+                            # cross_lang : Chinese audio + foreign subtitles (OCR master)
+  source_language: "en"     # "zh" (default) | "en" | other ISO-639-1 code
+                            # Drives ASR language, output subdir name, prompt selection,
+                            # and auto-disables translation when source is already English.
 
 # ── same_lang mode (中配中字) ──────────────────────────────────────────────────
 same_lang:
@@ -14,17 +17,12 @@ same_lang:
     model: "large-v3"       # stable-whisper model name
     device: "cuda"          # "cuda" | "cpu"
     compute_type: "float16" # faster-whisper precision: "float16" | "int8" | "float32"
-    watermark_patterns:     # platform intro/outro phrases to suppress (add per-show keywords)
-      - "优优"
-      - "YoYo Television"
-      - "独播剧场"
-      - "明镜"
-      - "欢迎订阅"
-      - "请不吝点赞"
+    language: "en"          # Whisper language code — "zh" for Chinese, "en" for English
+    watermark_patterns: []  # platform intro/outro phrases to suppress
   ocr:
     fps: 2                  # frames per second sampled for OCR
     roi: [0.602, 0.6933]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
-    language: "ch"          # PaddleOCR language code
+    language: "en"          # PaddleOCR language code — "ch" for Chinese, "en" for English
     use_gpu: true
   alignment:
     min_overlap_abs_sec: 0.5      # absolute overlap threshold (seconds)
@@ -101,10 +99,10 @@ lang_detection:
 
 # ── File system paths ─────────────────────────────────────────────────────────
 paths:
-  raw_video_dir: "data/raw/win the love war-cn"  # source video files (01.mp4, 02.mp4, …)
-  cache_dir: "data/cache"         # intermediate cache (asr/, ocr/, aligned/, map_batches/)
-  meta_dir: "data/meta"           # meta_raw.json + meta.json (human-review checkpoint)
-  output_dir: "data/output"       # final .srt files + validation_report.json
+  raw_video_dir: "data/raw/dollar baby"          # source video files (01.mp4, 02.mp4, …)
+  cache_dir: "data/cache"                         # intermediate cache (asr/, ocr/, aligned/, map_batches/)
+  meta_dir: "data/meta"                           # meta_raw.json + meta.json (human-review checkpoint)
+  output_dir: "data/output/dollar baby"           # show-specific output root; {source_language}/ subdir holds main SRTs
 
 # ── Layer 5 Intelligence — drama rhythm analysis ─────────────────────────────
 intelligence:
@@ -118,6 +116,7 @@ intelligence:
   # ── Multi-language translation matrix (run with: python pipeline.py --translate-only) ─
   translation:
     enabled: true               # master switch; --translate-only still respects this
+                                # Note: auto-disabled when pipeline.source_language == "en"
     target_languages: ["fr", "es"]    # French + Spanish produced alongside English by default
     genre_glossary_path: "data/meta/fantasy_glossary.json"  # optional; silently skipped if missing
 

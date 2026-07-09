@@ -109,8 +109,10 @@ class RhythmAnalyzer:
         self._characters: dict = (meta or {}).get("characters", {})
         self._jinja = _build_jinja_env()
 
-        # SRT files live in output_dir
-        self._srt_dir = output_dir
+        # SRT files live in the language subdir under output_dir (cn/ or en/ etc.)
+        source_language = cfg.get("pipeline", {}).get("source_language", "zh")
+        _subdir = "cn" if source_language == "zh" else source_language
+        self._srt_dir = output_dir / _subdir
 
     # ------------------------------------------------------------------ #
     #  Public                                                              #

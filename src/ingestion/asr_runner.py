@@ -144,6 +144,7 @@ class ASRRunner:
         self._model_name: str = asr_cfg.get("model", "large-v3")
         self._device: str = asr_cfg.get("device", "cuda")
         self._compute_type: str = asr_cfg.get("compute_type", "float16")
+        self._language: str = asr_cfg.get("language", "zh")
 
         # In same_lang the role is implicitly "master"; cross_lang reads from config.
         self._role: str = (
@@ -211,11 +212,11 @@ class ASRRunner:
         logger.info("Transcribing [%s] ...", video_path.name)
 
         # stable-ts accepts video paths directly (ffmpeg handles audio extraction).
-        # language="zh" avoids auto-detect overhead; valid for both same_lang
-        # (Chinese audio) and cross_lang semantic_anchor (also Chinese audio).
+        # language is read from asr config (defaults to "zh"); set to "en" for
+        # English-language shows to avoid auto-detect overhead and improve accuracy.
         result = model.transcribe(
             str(video_path),
-            language="zh",
+            language=self._language,
             word_timestamps=True,
             verbose=False,
         )

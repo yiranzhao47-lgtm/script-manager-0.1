@@ -158,16 +158,17 @@ class ProjectInitializer:
         self._meta_dir.mkdir(parents=True, exist_ok=True)
         logger.info("[Init] Purged data/meta/")
 
-        # Delete stale per-episode SRTs and run-level reports from output dir
+        # Delete stale per-episode SRTs from all language subdirs and run-level reports.
+        # SRTs live one level under output_dir named by source language (cn/, en/, …).
         if self._output_dir.exists():
-            for srt in self._output_dir.glob("*.srt"):
+            for srt in self._output_dir.glob("*/*.srt"):
                 srt.unlink()
             for report in ("validation_report.json", "cost_report.json",
                            "drama_structure_graph.json"):
                 fp = self._output_dir / report
                 if fp.exists():
                     fp.unlink()
-            logger.info("[Init] Purged data/output/ (SRTs + reports)")
+            logger.info("[Init] Purged output/*/*.srt + reports")
 
         if self._ckpt_path.exists():
             self._ckpt_path.unlink()

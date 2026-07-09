@@ -137,6 +137,7 @@ class TranslationMatrix:
         glossary_path_str: str = trans_cfg.get(
             "genre_glossary_path", "data/meta/fantasy_glossary.json"
         )
+        self._source_language: str = cfg.get("pipeline", {}).get("source_language", "zh")
 
         paths = cfg.get("paths", {})
         self._cache_dir   = Path(paths.get("cache_dir",   "data/cache"))
@@ -184,6 +185,13 @@ class TranslationMatrix:
         """Translate all *episode_ids* sequentially (Step 2 within each episode is parallel)."""
         if not self._enabled:
             logger.info("TranslationMatrix disabled in config — skipping")
+            return
+
+        if self._source_language == "en":
+            logger.info(
+                "TranslationMatrix: source_language='en' — translation skipped "
+                "(source content is already English; no ZH→EN conversion needed)"
+            )
             return
 
         # Ensure Western-style names are assigned before any translation
@@ -967,7 +975,8 @@ class TranslationMatrix:
 
         Fallback: raw aligned JSON if the refined SRT does not yet exist.
         """
-        refined_srt = self._output_dir / f"{ep_id}.srt"
+        _subdir = "cn" if self._source_language == "zh" else self._source_language
+        refined_srt = self._output_dir / _subdir / f"{ep_id}.srt"
         if refined_srt.exists():
             segs = self._parse_srt_to_segs(ep_id, refined_srt)
             if segs:

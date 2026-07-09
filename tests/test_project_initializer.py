@@ -74,7 +74,7 @@ def _make_project(tmp: Path) -> Path:
     (tmp / "data" / "cache" / "map_batches").mkdir(parents=True)
     (tmp / "data" / "cache" / "drama_map").mkdir(parents=True)
     (tmp / "data" / "meta").mkdir(parents=True)
-    (tmp / "data" / "output").mkdir(parents=True)
+    (tmp / "data" / "output" / "cn").mkdir(parents=True)
     (tmp / "config" / "prompts").mkdir(parents=True)
     (tmp / "config" / "settings.yaml").write_text(_SETTINGS_YAML, encoding="utf-8")
     (tmp / "config" / "prompts" / "init_agent_skill.md").write_text(
@@ -268,12 +268,16 @@ class TestPurgeStaleData(unittest.TestCase):
 
     def test_output_srts_deleted(self):
         out = self.tmp / "data" / "output"
-        (out / "01.srt").write_text("srt content")
-        (out / "02.srt").write_text("srt content")
+        cn = out / "cn"
+        en = out / "en"
+        cn.mkdir(parents=True, exist_ok=True)
+        en.mkdir(parents=True, exist_ok=True)
+        (cn / "01.srt").write_text("srt content")
+        (en / "01.srt").write_text("srt content")
         (out / "cost_report.json").write_text("{}")
         pi = _make_initializer(self.tmp)
         pi._purge_stale_data()
-        self.assertEqual(list(out.glob("*.srt")), [])
+        self.assertEqual(list(out.glob("*/*.srt")), [])
         self.assertFalse((out / "cost_report.json").exists())
 
     def test_validation_report_deleted(self):
