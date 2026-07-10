@@ -174,6 +174,8 @@ class OverlapAligner:
         self._min_asr_dur: float = float(al.get("min_asr_duration_sec", 0.2))
         self._asr_sparse_rescue: bool = bool(al.get("asr_sparse_rescue", True))
         self._asr_min_segs: int = int(al.get("asr_min_segments", 10))
+        self._rescue_dedup_sim: float = float(al.get("rescue_dedup_sim_threshold", 0.80))
+        self._rescue_dedup_gap: float = float(al.get("rescue_dedup_gap_sec", 0.6))
 
         cache = Path(cfg["paths"]["cache_dir"])
         self._asr_dir = cache / "asr"
@@ -412,8 +414,8 @@ class OverlapAligner:
         if not blocks:
             return blocks
 
-        _SIM_THRESH = 0.80
-        _GAP_THRESH = 0.6  # seconds; wider than one OCR frame (0.5 s at 2 fps)
+        _SIM_THRESH = self._rescue_dedup_sim
+        _GAP_THRESH = self._rescue_dedup_gap
 
         sorted_blocks = sorted(blocks, key=lambda b: b["start"])
         merged: list[dict] = []

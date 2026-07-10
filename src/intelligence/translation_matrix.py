@@ -188,9 +188,11 @@ class TranslationMatrix:
             return
 
         if self._source_language == "en":
-            logger.info(
-                "TranslationMatrix: source_language='en' — translation skipped "
-                "(source content is already English; no ZH→EN conversion needed)"
+            logger.warning(
+                "TranslationMatrix: [SKIP] %d episode(s) — source_language='en', "
+                "content is already English; ZH→EN translation not applicable. "
+                "0 LLM calls made, ¥0.00 cost for this stage.",
+                len(episode_ids),
             )
             return
 

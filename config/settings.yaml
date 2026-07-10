@@ -19,17 +19,24 @@ same_lang:
     compute_type: "float16" # faster-whisper precision: "float16" | "int8" | "float32"
     language: "en"          # Whisper language code — "zh" for Chinese, "en" for English
     watermark_patterns: []  # platform intro/outro phrases to suppress
+    hallucination:
+      max_segment_duration_sec: 8.0   # segments longer than this are dropped (Whisper fills silence with hallucinations; real dialogue rarely exceeds 4-5 s)
+      min_avg_probability: 0.50       # segment avg_probability below this → flagged as hallucination_risk
+      word_low_conf_threshold: 0.40   # per-word probability below this → word flagged as low_confidence
   ocr:
     fps: 2                  # frames per second sampled for OCR
-    roi: [0.602, 0.6933]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
+    roi: [0.602, 0.6933]    # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
     language: "en"          # PaddleOCR language code — "ch" for Chinese, "en" for English
     use_gpu: true
+    min_line_confidence: 0.50   # discard OCR text boxes with confidence below this value
   alignment:
     min_overlap_abs_sec: 0.5      # absolute overlap threshold (seconds)
     min_overlap_ratio: 0.40       # relative threshold: overlap / ASR_duration
     min_asr_duration_sec: 0.2     # ASR segments shorter than this skip OCR binding
     asr_sparse_rescue: true       # use OCR blocks as master when ASR is too sparse
     asr_min_segments: 10          # trigger rescue if ASR has fewer than this many segments
+    rescue_dedup_sim_threshold: 0.80  # SequenceMatcher ratio to merge near-duplicate OCR rescue blocks
+    rescue_dedup_gap_sec: 0.6         # max gap (s) between adjacent blocks eligible for rescue dedup
 
 # ── cross_lang mode (中配英字 / 外语译制) ─────────────────────────────────────
 cross_lang:
@@ -44,10 +51,12 @@ cross_lang:
     roi: [0.80, 0.95]
     language: "en"
     use_gpu: true
+    min_line_confidence: 0.50     # discard OCR text boxes with confidence below this value
   dedup:
     similarity_threshold: 0.85    # SequenceMatcher ratio to treat frames as same subtitle
     min_segment_duration_sec: 0.4 # discard OCR segments shorter than this (fade artifacts)
     normalize_before_compare: true # strip tags/symbols/case before similarity calc
+    fade_conf_floor: 0.55         # OCR detections below this treated as fade/transition frame (extend time, ignore text)
 
 # ── MapReduce entity extraction ───────────────────────────────────────────────
 metadata:
@@ -112,6 +121,11 @@ intelligence:
     map_max_tokens: 6000        # max completion tokens per episode analysis call
     reduce_max_tokens: 8000     # max completion tokens for the global blueprint call
     srt_char_limit: 15000       # truncate SRT content to this char limit before sending
+
+  # ── Paywall report scene compression range ───────────────────────────────────
+  paywall:
+    scene_ep_range_start: 1    # first episode included in scene compression feed (1-based)
+    scene_ep_range_end: 26     # last episode (exclusive) — episodes [start, end) are sent to Claude
 
   # ── Multi-language translation matrix (run with: python pipeline.py --translate-only) ─
   translation:

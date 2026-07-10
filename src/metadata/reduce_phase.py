@@ -327,6 +327,29 @@ class ReducePhase:
             )
             return characters
 
+        # Sanity-check: LLM should not drastically inflate the character count
+        # (merging can only reduce or hold the count, never grow it significantly)
+        if len(canonicalized) > len(characters) * 2:
+            logger.warning(
+                "Reduce LLM returned suspicious character count: %d → %d "
+                "(expected ≤ %d) — falling back to Python merge",
+                len(characters), len(canonicalized), len(characters) * 2,
+            )
+            return characters
+
+        # Validate each entry has the required fields
+        _REQUIRED_FIELDS = ("aliases", "canonical_en", "ocr_en_variants")
+        malformed = [
+            c for c, e in canonicalized.items()
+            if not all(f in e for f in _REQUIRED_FIELDS)
+        ]
+        if malformed:
+            logger.warning(
+                "Reduce LLM: %d character(s) missing required fields %s: %s "
+                "— _normalise_entry() will fill defaults",
+                len(malformed), _REQUIRED_FIELDS, malformed[:5],
+            )
+
         logger.info(
             "Reduce LLM canonicalization done — %d → %d character(s)",
             len(characters),

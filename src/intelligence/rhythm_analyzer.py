@@ -306,12 +306,24 @@ class RhythmAnalyzer:
             return {}
 
         try:
-            return extract_json(raw)
+            blueprint = extract_json(raw)
         except ValueError as exc:
             logger.warning(
                 "RhythmAnalyzer: reduce LLM returned non-JSON — blueprint empty.  %s", exc
             )
             return {}
+
+        # Schema validation — warn on missing keys but return partial blueprint
+        _REQUIRED = ("debt_chain_narrative", "first_pinch", "second_pinch",
+                     "post_first_pinch_flow", "marketing_clips")
+        missing = [k for k in _REQUIRED if k not in blueprint]
+        if missing:
+            logger.warning(
+                "RhythmAnalyzer: Reduce blueprint missing key(s): %s — "
+                "paywall report and clip recommendations may be incomplete.",
+                missing,
+            )
+        return blueprint
 
     def _build_conflict_chain(self, conflict_map: dict[str, dict]) -> str:
         """

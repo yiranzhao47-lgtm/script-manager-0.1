@@ -35,14 +35,10 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Per-word confidence below which the word is flagged (not filtered out)
-_WORD_LOW_CONF = 0.40
-# ── Segment average below which the whole segment is marked as hallucination risk
-_SEG_HALLUCINATION_THRESHOLD = 0.50
-# ── Segments longer than this are almost certainly Whisper hallucinations during
-#    silence / non-speech regions.  Real dialogue segments rarely exceed 4–5 s;
-#    hallucinated "请点赞订阅" fills span 10–20 s and always exceed this limit.
-_SEG_MAX_DURATION_SEC = 8.0
+# Module-level fallback defaults (used only when not overridden in settings.yaml)
+_WORD_LOW_CONF_DEFAULT = 0.40
+_SEG_HALLUCINATION_THRESHOLD_DEFAULT = 0.50
+_SEG_MAX_DURATION_SEC_DEFAULT = 8.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -153,6 +149,15 @@ class ASRRunner:
         )
         self._watermark_patterns: list[str] = asr_cfg.get("watermark_patterns", [])
 
+        # Hallucination detection thresholds — configurable under same_lang.asr.hallucination
+        halluc_cfg = asr_cfg.get("hallucination", {})
+        self._seg_max_duration: float = float(
+            halluc_cfg.get("max_segment_duration_sec", _SEG_MAX_DURATION_SEC_DEFAULT))
+        self._seg_hallucination_threshold: float = float(
+            halluc_cfg.get("min_avg_probability", _SEG_HALLUCINATION_THRESHOLD_DEFAULT))
+        self._word_low_conf: float = float(
+            halluc_cfg.get("word_low_conf_threshold", _WORD_LOW_CONF_DEFAULT))
+
         cache_root = Path(cfg["paths"]["cache_dir"])
         self._cache_dir = cache_root / "asr"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -235,7 +240,7 @@ class ASRRunner:
                     text=str(raw_seg.text).strip(),
                     words=words,
                     avg_probability=round(avg_prob, 4),
-                    hallucination_risk=avg_prob < _SEG_HALLUCINATION_THRESHOLD,
+                    hallucination_risk=avg_prob < self._seg_hallucination_threshold,
                 )
             )
 
@@ -244,23 +249,23 @@ class ASRRunner:
             logger.warning(
                 "[%s] %d / %d segments flagged hallucination_risk "
                 "(avg_probability < %.2f) — often silence or background music",
-                episode_id, n_risk, len(segments), _SEG_HALLUCINATION_THRESHOLD,
+                episode_id, n_risk, len(segments), self._seg_hallucination_threshold,
             )
 
         # ── Duration-based hallucination filter ───────────────────────────
         # Whisper silently fills non-speech regions (silence, BGM) with
         # plausible-sounding text at high confidence.  The tell is segment
         # duration: real dialogue is < 4–5 s; hallucinated fills span 10–20 s.
-        long_segs = [s for s in segments if (s.end - s.start) > _SEG_MAX_DURATION_SEC]
+        long_segs = [s for s in segments if (s.end - s.start) > self._seg_max_duration]
         if long_segs:
-            segments = [s for s in segments if (s.end - s.start) <= _SEG_MAX_DURATION_SEC]
+            segments = [s for s in segments if (s.end - s.start) <= self._seg_max_duration]
             logger.warning(
                 "[%s] %d over-long segment(s) removed (duration > %.0fs) — "
                 "likely Whisper hallucination during silence/BGM regions.  "
                 "Removed: %s",
                 episode_id,
                 len(long_segs),
-                _SEG_MAX_DURATION_SEC,
+                self._seg_max_duration,
                 [(round(s.end - s.start, 1), repr(s.text[:30])) for s in long_segs],
             )
 
@@ -287,8 +292,7 @@ class ASRRunner:
 
         return segments
 
-    @staticmethod
-    def _parse_words(raw_seg: Any) -> list[ASRWord]:
+    def _parse_words(self, raw_seg: Any) -> list[ASRWord]:
         raw_words = getattr(raw_seg, "words", None)
         if not raw_words:
             return []
@@ -301,7 +305,7 @@ class ASRRunner:
                     start=round(float(w.start), 3),
                     end=round(float(w.end), 3),
                     probability=round(prob, 4),
-                    low_confidence=prob < _WORD_LOW_CONF,
+                    low_confidence=prob < self._word_low_conf,
                 )
             )
         return words

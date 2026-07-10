@@ -24,8 +24,9 @@ from jinja2 import Environment, FileSystemLoader
 
 logger = logging.getLogger(__name__)
 
-# Episodes to include in the compressed scene feed (paywall zone).
-_SCENE_EP_RANGE = range(1, 26)  # ep01-25
+# Module-level fallback defaults (overridable via intelligence.paywall config)
+_SCENE_EP_RANGE_START_DEFAULT = 1
+_SCENE_EP_RANGE_END_DEFAULT = 26  # exclusive, i.e. ep01-25
 
 
 class PaywallStrategist:
@@ -43,6 +44,11 @@ class PaywallStrategist:
         paths = cfg.get("paths", {})
         self._output_dir = Path(paths.get("output_dir", "data/output"))
         self._meta_dir   = Path(paths.get("meta_dir",   "data/meta"))
+
+        paywall_cfg = cfg.get("intelligence", {}).get("paywall", {})
+        ep_start = int(paywall_cfg.get("scene_ep_range_start", _SCENE_EP_RANGE_START_DEFAULT))
+        ep_end   = int(paywall_cfg.get("scene_ep_range_end",   _SCENE_EP_RANGE_END_DEFAULT))
+        self._scene_ep_range = range(ep_start, ep_end)
 
         prompts_dir = Path("config/prompts")
         self._jinja = Environment(
@@ -127,7 +133,7 @@ class PaywallStrategist:
         """
         ep_conflicts = graph.get("episode_conflicts", {})
         result = []
-        for ep_num in _SCENE_EP_RANGE:
+        for ep_num in self._scene_ep_range:
             ep_id = str(ep_num).zfill(2)
             if ep_id not in ep_conflicts:
                 continue

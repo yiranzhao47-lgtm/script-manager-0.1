@@ -27,7 +27,7 @@ from unittest.mock import MagicMock, patch
 # Shared minimal config
 # ---------------------------------------------------------------------------
 _CFG = {
-    "pipeline": {"mode": "same_lang"},
+    "pipeline": {"mode": "same_lang", "source_language": "zh"},
     "paths": {
         "raw_video_dir": "data/raw",
         "cache_dir":     "data/cache",
@@ -172,7 +172,7 @@ class TestSRTLoading(unittest.TestCase):
         with TemporaryDirectory() as td:
             tmp = Path(td)
             analyzer = _make_analyzer(tmp)
-            self._write_srt(tmp / "output", "ep01", "1\n00:00:01,000 --> 00:00:02,000\nHello\n")
+            self._write_srt(tmp / "output" / "cn", "ep01", "1\n00:00:01,000 --> 00:00:02,000\nHello\n")
             content = analyzer._load_srt("ep01")
             self.assertIn("Hello", content)
 
@@ -189,7 +189,7 @@ class TestSRTLoading(unittest.TestCase):
             analyzer = _make_analyzer(tmp)
             # srt_char_limit is 500 in test config
             long_content = "A" * 1000
-            self._write_srt(tmp / "output", "ep01", long_content)
+            self._write_srt(tmp / "output" / "cn", "ep01", long_content)
             result = analyzer._load_srt("ep01")
             self.assertEqual(len(result), 500)
 
@@ -198,7 +198,7 @@ class TestSRTLoading(unittest.TestCase):
             tmp = Path(td)
             analyzer = _make_analyzer(tmp)
             short_content = "B" * 100
-            self._write_srt(tmp / "output", "ep01", short_content)
+            self._write_srt(tmp / "output" / "cn", "ep01", short_content)
             result = analyzer._load_srt("ep01")
             self.assertEqual(len(result), 100)
 
@@ -240,7 +240,7 @@ class TestAnalyzeOneEpisode(unittest.TestCase):
         with TemporaryDirectory() as td:
             tmp = Path(td)
             # Write an SRT so _load_srt doesn't fail
-            srt_dir = tmp / "output"
+            srt_dir = tmp / "output" / "cn"
             srt_dir.mkdir(parents=True)
             (srt_dir / "ep03.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n", encoding="utf-8")
 
@@ -260,7 +260,7 @@ class TestAnalyzeOneEpisode(unittest.TestCase):
     def test_cache_miss_writes_new_cache(self):
         with TemporaryDirectory() as td:
             tmp = Path(td)
-            srt_dir = tmp / "output"
+            srt_dir = tmp / "output" / "cn"
             srt_dir.mkdir(parents=True)
             (srt_dir / "ep04.srt").write_text("subtitle content", encoding="utf-8")
 
@@ -275,7 +275,7 @@ class TestAnalyzeOneEpisode(unittest.TestCase):
     def test_llm_missing_scenes_raises_value_error(self):
         with TemporaryDirectory() as td:
             tmp = Path(td)
-            srt_dir = tmp / "output"
+            srt_dir = tmp / "output" / "cn"
             srt_dir.mkdir(parents=True)
             (srt_dir / "ep05.srt").write_text("content", encoding="utf-8")
 
@@ -480,9 +480,11 @@ class TestAssembleAndWrite(unittest.TestCase):
 class TestRunIntegration(unittest.TestCase):
 
     def _setup_srt(self, output_dir: Path, ep_ids: list[str]) -> None:
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # source_language="zh" → SRTs live in cn/ subdir
+        srt_dir = output_dir / "cn"
+        srt_dir.mkdir(parents=True, exist_ok=True)
         for ep_id in ep_ids:
-            (output_dir / f"{ep_id}.srt").write_text(
+            (srt_dir / f"{ep_id}.srt").write_text(
                 f"1\n00:00:01,000 --> 00:00:02,000\nContent for {ep_id}\n",
                 encoding="utf-8",
             )
@@ -529,7 +531,7 @@ class TestRunIntegration(unittest.TestCase):
     def test_run_partial_failure_uses_successful_episodes(self):
         with TemporaryDirectory() as td:
             tmp = Path(td)
-            # Only ep01 has an SRT; ep02 will fail
+            # Only ep01 has an SRT (in cn/ subdir); ep02 will fail
             self._setup_srt(tmp / "output", ["ep01"])
 
             blueprint = {"debt_chain_narrative": "partial"}

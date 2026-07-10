@@ -38,8 +38,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── Discard any OCR detection whose confidence falls below this value
-_MIN_LINE_CONFIDENCE = 0.50
+# Module-level fallback default (used when not set in settings.yaml)
+_MIN_LINE_CONFIDENCE_DEFAULT = 0.50
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -164,6 +164,7 @@ def _atomic_json_write(path: Path, data: dict) -> None:
 def _parse_ocr_result(
     raw_result: list,
     frame_time: float,
+    min_confidence: float = _MIN_LINE_CONFIDENCE_DEFAULT,
 ) -> Optional[OCRFrame]:
     """
     Convert raw PaddleOCR output for one frame into an OCRFrame.
@@ -196,7 +197,7 @@ def _parse_ocr_result(
         text, conf = text_info[0], text_info[1]
         if not isinstance(text, str) or not text.strip():
             continue
-        if not isinstance(conf, (int, float)) or float(conf) < _MIN_LINE_CONFIDENCE:
+        if not isinstance(conf, (int, float)) or float(conf) < min_confidence:
             continue
         # y-coordinate of top-left corner for top-to-bottom ordering
         top_y = float(bbox[0][1]) if isinstance(bbox, (list, tuple)) and bbox else 0.0
@@ -251,6 +252,8 @@ class OCRRunner:
         self._roi: tuple[float, float] = (float(roi_raw[0]), float(roi_raw[1]))
         self._language: str = ocr_cfg.get("language", "ch" if mode == "same_lang" else "en")
         self._use_gpu: bool = bool(ocr_cfg.get("use_gpu", True))
+        self._min_line_confidence: float = float(
+            ocr_cfg.get("min_line_confidence", _MIN_LINE_CONFIDENCE_DEFAULT))
 
         cache_root = Path(cfg["paths"]["cache_dir"])
         self._cache_dir = cache_root / "ocr"
@@ -372,7 +375,7 @@ class OCRRunner:
     ) -> Optional[OCRFrame]:
         try:
             raw = ocr_engine.ocr(roi_crop, cls=False)
-            return _parse_ocr_result(raw, frame_time)
+            return _parse_ocr_result(raw, frame_time, self._min_line_confidence)
         except Exception as exc:
             logger.debug("OCR error at t=%.3fs (frame skipped): %s", frame_time, exc)
             return None

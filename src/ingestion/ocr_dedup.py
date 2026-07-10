@@ -68,8 +68,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Frames below this confidence are treated as "transition" (fade in/out)
-_FADE_CONF_FLOOR = 0.55
+# Module-level fallback default (overridable via cross_lang.dedup.fade_conf_floor)
+_FADE_CONF_FLOOR_DEFAULT = 0.55
 
 # ── Normalization patterns ────────────────────────────────────────────────────
 _RE_HTML = re.compile(r"<[^>]+>")
@@ -196,6 +196,8 @@ class OCRDedup:
         dedup_cfg = cfg.get("cross_lang", {}).get("dedup", {})
         self._threshold: float = float(dedup_cfg.get("similarity_threshold", 0.85))
         self._min_duration: float = float(dedup_cfg.get("min_segment_duration_sec", 0.4))
+        self._fade_conf_floor: float = float(
+            dedup_cfg.get("fade_conf_floor", _FADE_CONF_FLOOR_DEFAULT))
 
         cache_root = Path(cfg["paths"]["cache_dir"])
         self._timeline_dir = cache_root / "ocr" / "ocr_timeline"
@@ -280,7 +282,7 @@ class OCRDedup:
                 continue
 
             # ── Transition frame: fade in/out artifact ─────────────────
-            if avg_conf < _FADE_CONF_FLOOR:
+            if avg_conf < self._fade_conf_floor:
                 if active is not None:
                     active.extend_transition(frame_time, interval)
                 # A transition frame alone (no active segment) does not
