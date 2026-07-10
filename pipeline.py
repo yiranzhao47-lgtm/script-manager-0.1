@@ -130,6 +130,7 @@ class ShortDramaPipeline:
         self,
         video_dir: Optional[Path] = None,
         skip_preflight: bool = False,
+        yes: bool = False,
     ) -> None:
         """
         Run the full pipeline end-to-end.
@@ -141,6 +142,8 @@ class ShortDramaPipeline:
         skip_preflight:
             Skip the language pre-flight detection (useful for fast restarts
             when you have already verified the videos manually).
+        yes:
+            Skip the dry-run confirmation prompt (for CI / scripted runs).
         """
         if video_dir is not None:
             self._video_dir = video_dir
@@ -168,6 +171,11 @@ class ShortDramaPipeline:
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
         self._log_checkpoint_summary(episode_ids)
+
+        # ── Dry-run guard (new show only; silent on resume) ───────────────
+        from src.utils.dry_run import DryRunGuard
+        if not DryRunGuard(self._cfg).check_and_confirm(episode_ids, yes=yes):
+            sys.exit(0)
 
         # ── Stage 0: Pre-flight ───────────────────────────────────────────
         if not skip_preflight:
@@ -585,6 +593,9 @@ Examples:
   # Use a custom config:
   python pipeline.py --config config/my_project.yaml
 
+  # Skip the cost-estimate confirmation prompt (CI / batch runs):
+  python pipeline.py --yes
+
   # Translate already-refined episodes (no GPU required):
   python pipeline.py --translate-only
   python pipeline.py --translate-only --episodes 01,02,05
@@ -636,6 +647,11 @@ Examples:
             "drama_structure_graph.json. No GPU required — calls Claude only. "
             "Output: data/output/paywall_strategy_report.md"
         ),
+    )
+    parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip the dry-run confirmation prompt (for CI / scripted runs)",
     )
     return parser
 
@@ -824,7 +840,7 @@ def main() -> None:
     video_dir = Path(args.video_dir) if args.video_dir else None
 
     pipeline = ShortDramaPipeline(cfg)
-    pipeline.run(video_dir=video_dir, skip_preflight=args.skip_preflight)
+    pipeline.run(video_dir=video_dir, skip_preflight=args.skip_preflight, yes=args.yes)
 
 
 if __name__ == "__main__":
