@@ -28,6 +28,12 @@
      └────────────────────────────────────────────────────┘
            │  输出: data/cache/aligned/{ep}_aligned.json
            │
+     [验证] ─ ASR 语种核验（_validate_asr_language）
+           │  采样前 3 集 ASR 文本 → 计算 CJK 字符占比
+           │  zh 剧 CJK < 20%  → abort（Whisper 在中文音频上输出英文幻觉）
+           │  en 剧 CJK > 60%  → abort（ASR 语种与配置不符）
+           │  ← 防线：在任何 LLM token 被消耗前拦截语种配置错误
+           │
      Stage 3 ─ MapReduce (人物实体提取)
            │
      ┌─────┴─────────────────────────────────────────────┐
@@ -57,7 +63,20 @@
            │  输出: data/output/<show_name>/drama_structure_graph.json
            │         data/output/<show_name>/cost_report.json
            │
-     Stage 6 ─ Translation (可选，由 intelligence.translation.enabled 开关控制)
+     Stage 6 ─ Creatives (可选，由 intelligence.creatives.enabled 开关控制)
+           │
+     ┌─────┴─────────────────────────────────────────────┐
+     │  scripts/                                          │
+     │    extract_clips.py — 读 drama_structure_graph，   │
+     │                       ffmpeg 裁剪锚点片段           │
+     │    plan_clips.py    — LLM 制定最终剪辑方案          │
+     │    assemble_clips.py — ffmpeg 二次编码 + 拼接       │
+     └────────────────────────────────────────────────────┘
+           │  输出: data/output/<show_name>/creatives/clip_<N>_*.mp4   ← 原始锚点片段
+           │         data/output/<show_name>/clip_plans.json           ← LLM 剪辑方案
+           │         data/output/<show_name>/creatives/ext_<N>_*.mp4  ← 最终营销素材
+           │
+     Stage 7 ─ Translation (可选，由 intelligence.translation.enabled 开关控制)
            │
      ┌─────┴─────────────────────────────────────────────┐
      │  src/intelligence/                                 │
@@ -71,7 +90,7 @@
            │  输出: data/output/<show_name>/translations/{lang}/{ep}_{lang}.srt
            │         data/meta/char_name_en_override.json
            │
-     Stage 7 ─ Paywall Report (可选，python pipeline.py --paywall-report)
+     Stage 8 ─ Paywall Report (可选，python pipeline.py --paywall-report)
            │
      ┌─────┴─────────────────────────────────────────────┐
      │  src/intelligence/                                 │
@@ -86,7 +105,7 @@
 | 层次 | 关键文件 | 职责 |
 |------|---------|------|
 | 调度 | `pipeline.py` | CLI 入口、4 阶段串联、checkpoint 驱动、tqdm 进度 |
-| 摄取 | `asr_runner.py` | stable-whisper large-v3，逐集转录，GPU scope 保护 |
+| 摄取 | `asr_runner.py` | stable-whisper large-v3，逐集转录，GPU scope 保护；cache 写入 `asr_language` 语种指纹，加载时自动校验，语种变更强制重新转录 |
 | 摄取 | `ocr_runner.py` | PaddleOCR，动态 ROI，动态 FPS，逐帧缓存 JSON |
 | 摄取 | `ocr_dedup.py` | 相似度合并帧序列 → 字幕时间段（cross_lang 专用） |
 | 对齐 | `overlap_aligner.py` | 双条件时间重叠打分，输出统一对齐 JSON；ASR 稀疏时自动升格 OCR 为 master；前导 OCR 救援补录 ASR 未覆盖的开头台词 |
@@ -97,13 +116,16 @@
 | 工具 | `gpu_manager.py` | GPU 序列化看门狗，pynvml 遥测 |
 | 工具 | `checkpoint.py` | 原子状态机，BOM-free JSON |
 | 工具 | `llm_client.py` | OpenAI 兼容封装，tenacity 重试，线程安全 FinOps 账本 |
-| 工具 | `lang_detector.py` | 帧采样 → 字符集预检（CJK / Latin），根据 `source_language` 自动切换期望脚本族 |
+| 工具 | `lang_detector.py` | 帧采样 → 字符集预检（CJK / Latin），根据 `source_language` 自动切换期望脚本族；`detect_pipeline_mode()` 结合字幕 OCR + 音频 tiny-Whisper 自动判断 same_lang / cross_lang；`cjk_ratio()` 公开接口供 pipeline 语种核验调用 |
 | 工具 | `token_counter.py` | tiktoken 估算，超限警告 |
 | 智能 | `rhythm_analyzer.py` | 两阶段 MapReduce 剧情因果链拆分，并行 Map + 单次 Reduce |
 | 智能 | `cost_auditor.py` | FinOps 核算：按模块分类 token 用量，输出 CNY 成本表；`cfg_key` 参数支持 DeepSeek / Claude 独立计费 |
 | 智能 | `paywall_strategist.py` | 读取 drama_structure_graph.json，以 JSON 中 first_pinch / second_pinch 为确定卡点，Claude 撰写深度运营分析 + 营销素材剪辑建议（8-10 条）|
 | 翻译 | `translation_matrix.py` | 双轨多语言翻译矩阵：DeepSeek 骨架 + Claude 润色 + 多语言并发（EN / FR / ES 默认开启） |
-| 工具 | `scripts/reset_checkpoint.py` | 安全回滚单集检查点状态（Python，无 BOM 风险） |
+| 素材 | `scripts/extract_clips.py` | 读 drama_structure_graph.json 的锚点列表，调用 ffmpeg 裁剪每个锚点为独立片段；idempotent |
+| 素材 | `scripts/plan_clips.py` | DeepSeek LLM 二次规划：从锚点片段中选取最优组合，输出 clip_plans.json；skip-if-exists 保护 |
+| 素材 | `scripts/assemble_clips.py` | 读 clip_plans.json，ffmpeg 二次编码（-crf 18）+ filter_complex concat，输出 ext_*.mp4；skip-if-exists 保护 |
+| 工具 | `scripts/reset_checkpoint.py` | 安全回滚单集检查点状态（Python，无 BOM 风险）；接受 `<drama_name>` 参数 |
 
 ### 1.2　Strategy 模式：两个开关驱动全系统行为
 
@@ -541,24 +563,40 @@ $env:DEEPSEEK_API_KEY = "your_key_here"
 ### 3.2　CLI 常用命令
 
 ```powershell
-# 一键全量运行（读取 config/settings.yaml 默认配置）
+# 处理单部剧（推荐，剧名 = data/raw/ 下的目录名）
+python pipeline.py "dollar baby"
+
+# 处理 data/raw/ 下所有剧集（顺次执行，每部剧独立 cache/meta/output）
+python pipeline.py --all
+
+# 向后兼容：不传剧名时自动读取 settings.yaml 中的 paths.raw_video_dir
 python pipeline.py
 
-# 切换到英文字幕模式（不修改 yaml，临时覆盖）
-python pipeline.py --mode cross_lang
+# 临时切换模式（不修改 yaml）
+python pipeline.py "dollar baby" --mode cross_lang
 
 # 跳过语言预检（已手动确认视频语言，加快重启速度）
-python pipeline.py --skip-preflight
+python pipeline.py "dollar baby" --skip-preflight
 
-# 指定外部视频目录（路径含空格时加引号）
-python pipeline.py --video-dir "D:\drama\season2\raw"
+# 跳过费用估算确认（CI / 批量运行）
+python pipeline.py "dollar baby" --yes
 
-# 使用自定义配置文件（多剧集项目并行管理）
-python pipeline.py --config config/drama_B.yaml
+# 仅运行翻译（不需要 GPU）
+python pipeline.py "dollar baby" --translate-only
+python pipeline.py "dollar baby" --translate-only --episodes 01,02,05
 
-# 以上选项可组合
-python pipeline.py --mode cross_lang --skip-preflight --video-dir "E:\raw"
+# 生成付费墙战略报告
+python pipeline.py "dollar baby" --paywall-report
 ```
+
+**路径自动推导规则（传剧名时）：**
+
+| 路径 | 自动推导结果 |
+|------|------------|
+| 视频源 | `data/raw/<drama_name>/` |
+| 缓存 | `data/cache/<drama_name>/`（含 checkpoint、asr、ocr 等，每剧独立）|
+| 元数据 | `data/meta/<drama_name>/`（含 meta.json，每剧独立）|
+| 输出 | `data/output/<drama_name>/` |
 
 ### 3.3　断点续传机制
 
@@ -572,14 +610,14 @@ pending → asr_done → ocr_done → aligned → refined → complete
 
 **查看当前进度：**
 ```powershell
-cat data\cache\checkpoint.json
+cat "data\cache\<show_name>\checkpoint.json"
 ```
 
 **安全回滚单集 checkpoint（推荐，避免 PowerShell BOM 污染）：**
 ```powershell
-# 格式：python scripts/reset_checkpoint.py <episode_id> <state>
+# 格式：python scripts/reset_checkpoint.py <drama_name> <episode_id> <state>
 # 有效状态：pending  asr_done  ocr_done  aligned  refined  complete
-python scripts/reset_checkpoint.py 01 ocr_done   # 将 ep01 回滚到 ocr_done
+python scripts/reset_checkpoint.py "dollar baby" 01 ocr_done
 ```
 
 > **警告：** 不要用 PowerShell `Set-Content` / `ConvertTo-Json` 直接写入 `checkpoint.json`——PowerShell 5.1 的 UTF-8 编码默认带 BOM，Python `json.load()` 解析失败会把所有集数重置为 `pending`，触发全量重跑。始终用 `scripts/reset_checkpoint.py`。
@@ -590,24 +628,23 @@ python scripts/reset_checkpoint.py 01 ocr_done   # 将 ep01 回滚到 ocr_done
 Remove-Item "data\output\<show_name>\cn\03.srt"
 # 英文剧（source_language="en"）：
 Remove-Item "data\output\<show_name>\en\03.srt"
-python pipeline.py --skip-preflight   # ep03 将重新执行 Stage 4
+python pipeline.py "<show_name>" --skip-preflight   # ep03 将重新执行 Stage 4
 ```
 
 **重跑全部精修（保留 ASR/OCR/Alignment 缓存）：**
 ```powershell
-# 注意：使用 UTF-8 无 BOM 编码写入 checkpoint.json
 Remove-Item "data\output\<show_name>\cn\*.srt"   # 中文剧
 Remove-Item "data\output\<show_name>\en\*.srt"   # 英文剧
-# 编辑 data\cache\checkpoint.json，将所有 "complete"/"refined" 改为 "aligned"
-python pipeline.py --skip-preflight
+# 编辑 data\cache\<show_name>\checkpoint.json，将所有 "complete"/"refined" 改为 "aligned"
+python pipeline.py "<show_name>" --skip-preflight
 ```
 
-**完全重跑（清除所有缓存）：**
+**完全重跑（清除该剧所有缓存）：**
 ```powershell
-Remove-Item -Recurse -Force data\cache\*
-Remove-Item -Recurse -Force "data\output\<show_name>\*"
-Remove-Item -Force data\meta\*
-python pipeline.py
+Remove-Item -Recurse -Force "data\cache\<show_name>"
+Remove-Item -Recurse -Force "data\output\<show_name>"
+Remove-Item -Recurse -Force "data\meta\<show_name>"
+python pipeline.py "<show_name>"
 ```
 
 **修复特定集数的 ASR 幻觉（不重新跑 Whisper）：**
@@ -615,11 +652,11 @@ python pipeline.py
 适用场景：某几集 SRT 字幕极少（< 1 KB），确认 ASR JSON 中含 duration > 8 s 的幻觉段。
 
 ```powershell
-# 1. 过滤存量 ASR 缓存（以 ep28 为例）
+# 1. 过滤存量 ASR 缓存（以 ep28 为例，替换 <show_name> 为剧名）
 python -c "
 import json, pathlib
 for ep in ['28', '29']:   # 替换为实际问题集数
-    p = pathlib.Path(f'data/cache/asr/{ep}_asr.json')
+    p = pathlib.Path(f'data/cache/<show_name>/asr/{ep}_asr.json')
     d = json.loads(p.read_text(encoding='utf-8'))
     d['segments'] = [s for s in d['segments'] if s['end']-s['start'] <= 8.0]
     for i,s in enumerate(d['segments']): s['id'] = i
@@ -630,14 +667,14 @@ for ep in ['28', '29']:   # 替换为实际问题集数
 "
 
 # 2. 删除下游缓存（aligned + SRT）
-Remove-Item data\cache\aligned\28_aligned.json, data\cache\aligned\29_aligned.json
+Remove-Item "data\cache\<show_name>\aligned\28_aligned.json", "data\cache\<show_name>\aligned\29_aligned.json"
 # 中文剧：
 Remove-Item "data\output\<show_name>\cn\28.srt", "data\output\<show_name>\cn\29.srt"
 
 # 3. 回滚 checkpoint，让 pipeline 从对齐阶段重跑
 python -c "
 import json, pathlib
-p = pathlib.Path('data/cache/checkpoint.json')
+p = pathlib.Path('data/cache/<show_name>/checkpoint.json')
 d = json.loads(p.read_text(encoding='utf-8'))
 for ep in ['28', '29']: d['episodes'][ep] = 'ocr_done'
 t = p.with_suffix('.tmp')
@@ -645,7 +682,7 @@ t.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding='utf-8'); t.r
 "
 
 # 4. 重跑（只处理回滚的几集，耗时 < 1 分钟）
-python pipeline.py --skip-preflight
+python pipeline.py "<show_name>" --skip-preflight
 ```
 
 > **注意：** 如果 ASR 稀疏救援（防御 7）已开启（默认），且 OCR 有足够块，pipeline 会自动用 OCR 升格为 master，无需手动干预。上述步骤仅当需要精确控制时使用。
@@ -676,16 +713,14 @@ cross_lang:                # ④ 若 cross_lang：
     roi: [0.80, 0.95]      #    英文字幕通常在画面底部 80-95%
     fps: 5                 #    英文字幕切换快，5fps 不要降
 
-paths:
-  raw_video_dir: "data/raw/<show_name>"  # ⑤ 视频目录，每剧独立子目录
-  output_dir:    "data/output/<show_name>"  # ⑥ 输出根目录，语言子目录自动创建
-                                            #    中文剧: output/<show>/cn/  英文剧: output/<show>/en/
 ```
+
+> **路径无需配置：** 使用 `python pipeline.py "<show_name>"` 时，`cache_dir`、`meta_dir`、`raw_video_dir`、`output_dir` 全部自动推导，不需要填写 `settings.yaml` 的 `paths:` 节。
 
 ROI 值确定方法：用 VLC 截图，量取字幕上边距 / 画面总高度 和 字幕下边距 / 画面总高度，对应 `[y_start_ratio, y_end_ratio]`。
 
-**ProjectInitializer 自动修复（换剧时自动触发）：**
-- 检测视频集合变化 → 清除旧剧所有缓存（asr / ocr / aligned / drama_map / meta）
+**ProjectInitializer 自动修复（每次运行时触发）：**
+- 检测视频集合变化 → 清除**该剧**缓存（asr / ocr / aligned / drama_map），meta 也重置
 - 对第一集第 15 秒帧做全屏 OCR → LLM 推断字幕 ROI → 自动更新 `settings.yaml` 中的 `roi:` 值
 - 如 ROI 推断失败（无 API Key），保留现有 `roi:` 值并继续
 
@@ -699,8 +734,28 @@ data/
       01.mp4
       02.mp4
       ...
+  cache/
+    <show_name>/           ← 每剧独立缓存（自动推导，无需配置）
+      checkpoint.json      ← 该剧的断点续传状态
+      asr/
+        01_asr.json
+        ...
+      ocr/
+        01_ocr.json
+        ...
+      aligned/
+        01_aligned.json
+        ...
+      map_batches/
+      drama_map/
+      translation/
+  meta/
+    <show_name>/           ← 每剧独立元数据（自动推导，无需配置）
+      meta.json            ← 人物名册，可手动修正后重跑 Stage 4
+      meta_raw.json        ← Map 阶段原始输出（备份）
+      char_name_en_override.json
   output/
-    <show_name>/           ← 输出根目录（与 raw_video_dir 末级目录同名）
+    <show_name>/           ← 输出根目录（与 raw/ 下目录同名）
       cn/                  ← 中文剧主字幕（source_language="zh"）
         01.srt             ← 最终字幕文件
         02.srt
@@ -713,14 +768,12 @@ data/
         fr/  01_fr.srt …
         es/  01_es.srt …
       drama_structure_graph.json  ← Stage 5 剧情分析（可选）
+      clip_plans.json             ← Stage 6 LLM 剪辑方案（可选）
+      creatives/                  ← Stage 6 营销素材（可选）
+        clip_<N>_ep<ep>_*.mp4    ← 原始锚点片段
+        ext_<N>_<title>.mp4      ← 最终营销素材
       cost_report_deepseek.json   ← FinOps 成本报告
       validation_report.json      ← 仅当有集数 LLM 两轮均失败时存在
-  meta/
-    meta.json              ← 人物名册，可手动修正后重跑 Stage 4
-    meta_raw.json          ← Map 阶段原始输出（备份）
-  cache/
-    checkpoint.json
-    asr/  ocr/  aligned/  drama_map/
 ```
 
 **validation_report.json 处理流程：**
@@ -824,6 +877,8 @@ data/
                渲染 reduce_rhythm.j2 → 单次 LLM 调用
                                │
                     Reduce 输出字段：
+                      synopsis_zh             中文剧情简介（250-400字，吸引人，首钩开头）
+                      synopsis_en             英文剧情简介（120-200词，西化人名，流媒体风格）
                       debt_chain_narrative    全剧因果债叙事综述
                       first_pinch             第一夹点（建议 ep 7-15）
                       second_pinch            第二夹点（建议 ep 20-30）
@@ -860,6 +915,8 @@ intelligence:
   "total_episodes_analysed": 40,
   "total_episodes_in_series": 40,
   "macro_blueprint": {
+    "synopsis_zh": "她以为嫁给他只是一场交易……",
+    "synopsis_en": "She thought marrying him was just a transaction...",
     "debt_chain_narrative": "...",
     "first_pinch": { "episode_range": "ep07-ep10", "trigger": "..." },
     "second_pinch": { "episode_range": "ep22-ep26", "trigger": "..." },
@@ -1096,6 +1153,71 @@ for item in arr:
 - **生效范围**：`_emit_srts()` 中执行（覆盖现有 80 集缓存，**无需重跑 LLM**）；同时在 `run_episode()` 的 skeleton 传给 Claude 前执行（改善 Claude 收到的输入质量）。
 - **ep02 验证**：4 对续句全部修正，独立完整句（如 "Jiecheng's products are substandard."）零误判。
 
+#### 防御 13　ASR 语种双重保险（语种指纹 + 预 LLM 快速核验）
+
+**问题背景：** Whisper 在中文音频上强制 `language="en"` 时，会输出流畅的英文幻觉文本（例如 "Let's have a cup of milk tea together"）。这类输出置信度正常，所有下游环节（对齐、MapReduce、精修）全部通过，83 集 LLM 精修费用全部浪费后才能发现字幕语种错误。
+
+根本诱因有两个：
+1. **旧版本 settings.yaml 硬编码语种**，后来改为自动检测，但历史 cache 仍以错误语种保存
+2. **cache 写入时不携带语种信息**，重跑时即使已修正语种配置，stale cache 仍被静默复用
+
+---
+
+##### 13a　ASR cache 语种指纹（`asr_runner.py`，防漏洞：stale cache 复用）
+
+**写入时**，每条 ASR cache 文件追加顶层字段：
+```json
+{ "asr_language": "zh", "model": "large-v3", ... }
+```
+
+**加载时**，`run_episode()` 读取 `cached.get("asr_language")`，与当前配置对比：
+
+```python
+if cached_lang is not None and cached_lang != self._language:
+    logger.warning(
+        "ASR cache language mismatch [%s]: cached=%s current=%s"
+        " — discarding stale cache and re-transcribing",
+        episode_id, cached_lang, self._language,
+    )
+    out_path.unlink()   # 删除 stale cache，强制重新转录
+```
+
+**注意：** 老格式 cache（无 `asr_language` 字段，`cached_lang is None`）视为兼容，不删不重跑。仅当字段存在且不匹配时才失效，保证存量数据零影响。
+
+---
+
+##### 13b　预 LLM 语种快速核验（`pipeline.py`，防漏洞：检测失败 + 无指纹的存量 cache）
+
+Stage 2 完成后、Stage 3（MapReduce）开始前，`_validate_asr_language()` 读取前 3 集 ASR 文本，计算 CJK 字符占比：
+
+```python
+ratio = cjk_ratio(sample_text)   # from src.utils.lang_detector
+
+if source_language == "zh" and ratio < 0.20:
+    raise RuntimeError("""
+  ╔══ ASR LANGUAGE MISMATCH — ABORTING BEFORE LLM STAGE ══╗
+  ║  Configured: source_language='zh'                      ║
+  ║  Detected:   CJK ratio=1.2% (expected >20%)            ║
+  ║  Fix: delete data/cache/<drama>/asr/ and re-run.        ║
+  ╚═════════════════════════════════════════════════════════╝""")
+
+if source_language == "en" and ratio > 0.60:
+    raise RuntimeError(...)   # 对称检测：en 剧输出中文 ASR 同样拦截
+```
+
+**阈值选择：** 中文口语 CJK 占比通常 60-80%；即使对话夹杂数字/英文品牌，20% 阈值也能稳定通过。Whisper 幻觉英文的 CJK 比例实测为 0-3%，与阈值有足够安全边距。
+
+**两道防线的关系：**
+
+| 场景 | 13a 指纹 | 13b 核验 | 结果 |
+|------|---------|---------|------|
+| 新剧，auto-detect 正确 | cache 写入正确语种 | CJK 比例通过 | 正常 |
+| 新剧，auto-detect 失败 | cache 写入错误语种 | CJK 比例**触发 abort** | 拦截 |
+| 老剧，语种配置后来修正 | 指纹不符 → **强制重跑 ASR** | CJK 比例通过 | 正常 |
+| 老剧，无指纹 stale cache | 不触发（兼容） | CJK 比例**触发 abort** | 拦截 |
+
+任意一道防线覆盖的场景，另一道作为兜底。
+
 #### 防御 12　SRT 跨块时间戳重叠修剪
 
 **文件：** `src/execution/episode_refiner.py` — `_clip_overlapping_ends()`
@@ -1152,9 +1274,9 @@ data/output/<show_name>/
     es/
       01_es.srt
       ...
-data/meta/
+data/meta/<show_name>/
   char_name_en_override.json   ← 人名西化映射，可手动修改后删缓存重跑
-data/cache/translation/
+data/cache/<show_name>/translation/
   01_translation.json          ← 骨架 + 润色 + 小语种 完整翻译缓存
 ```
 
@@ -1231,6 +1353,114 @@ intelligence:
 ```
 
 新增语种只需向数组追加 ISO 639-1 代码（如 `"th"`、`"vi"`），无需改代码。每种语言在 Step 2B 各启动一个独立线程，与 Claude EN 润色并发执行。
+
+---
+
+## 第七章　Marketing Clips — 信息流广告素材生产
+
+> **前提：** `drama_structure_graph.json` 已由 Stage 5 生成（包含 `marketing_clips` 和 `episode_conflicts`）。视频文件位于 `data/raw/<drama_name>/`。
+
+### 7.1　三步工作流
+
+```
+drama_structure_graph.json
+  marketing_clips（Reduce 阶段选出的 6-10 个情绪冲突锚点）
+         │
+   Step 1 ─ extract_clips.py
+         │  每个锚点 → 独立短片（30-60 s）
+         │  输出: data/output/<drama>/creatives/clip_NN_epXX_<strategy>.mp4
+         │
+   Step 2 ─ plan_clips.py
+         │  LLM 为每条短片规划 ~3 分钟延伸方案（clip_plans.json）
+         │  自动后处理：追加场景直到累计时长 ≥ 165 s，在下一个情绪节点前停住
+         │  输出: data/output/<drama>/clip_plans.json
+         │
+   Step 3 ─ assemble_clips.py
+         │  按 clip_plans.json 分段提取 + ffmpeg concat 拼接
+         │  输出: data/output/<drama>/creatives/ext_NN_<title>.mp4
+```
+
+### 7.2　完整命令
+
+```powershell
+# API Key（Step 2 调用 LLM 时需要）
+$env:DEEPSEEK_API_KEY = "your_key_here"
+
+# Step 1：提取短版切片（30-60 s）
+python scripts/extract_clips.py "<drama_name>"
+
+# Step 2：LLM 规划 3 分钟延伸版本
+python scripts/plan_clips.py "<drama_name>"
+
+# Step 3：组装最终素材
+python scripts/assemble_clips.py "<drama_name>"
+
+# 仅重跑 Step 2 的后处理延伸（不调 LLM，重用现有 clip_plans.json）
+python scripts/plan_clips.py "<drama_name>" --extend-only
+
+# 仅组装指定 clip（如 1、3、5）
+python scripts/assemble_clips.py "<drama_name>" 1 3 5
+```
+
+### 7.3　剪辑逻辑
+
+每条 `ext_*.mp4` 由三段结构组成：
+
+| 段 | 内容 | 来源 |
+|----|------|------|
+| **起点** | 情绪冲突锚点（最强情感勾子） | `drama_structure_graph.json` → Reduce 阶段选出 |
+| **中段** | LLM 规划的直接后续剧情 | `plan_clips.py` → LLM（`clip_planner.j2`） |
+| **尾段** | 自动延伸到下一情绪节点前 | `_extend_plan()`：追加场景直到 ≥ 165 s，在含 `pivot_signals` 的场景前停住 |
+
+**跨集衔接：** 同集连续场景合并为一段（减少切割），跨集开新段；ffmpeg 先对每段重编码保证帧精确裁剪，再 concat stream-copy 无损拼接。
+
+### 7.4　自动延伸算法（`_extend_plan`）
+
+```
+committed_sec = 当前所有段的视频时长之和（段首到段尾的实际跨度，含场间空隙）
+max_sec = target_sec + 50   ← 硬天花板（默认 215 s）
+
+逐场景向后扫描：
+  同集 → 扩展 pending_end（合并入当前待定段）
+  换集 → flush 待定段，committed_sec += 段跨度，开启新待定段
+  若加入此场景后 committed_sec ≥ target_sec → 置 target_reached = True
+  若 target_reached → 下一个含 pivot_signals 的场景设为 cliffhanger，停止
+  若加入此场景会超过 max_sec   → 此场景设为 cliffhanger，停止
+```
+
+**关键设计：** 追踪的是**段跨度**（包含场间空隙），而非各场景时长之和，避免因短剧场间转场导致低估实际视频时长。
+
+### 7.5　输出结构
+
+```
+data/output/<drama_name>/
+  clip_plans.json              ← Step 2 生成：10 条延伸方案（含 segments / cliffhanger）
+  creatives/
+    clip_01_ep01_cold_open.mp4  ← Step 1 短版（30-60 s）
+    clip_02_ep09_confrontation_cut.mp4
+    ...
+    ext_01_Campus Slut Exposed.mp4   ← Step 3 最终素材（~3 min）
+    ext_02_Daughter in Danger.mp4
+    ...
+```
+
+### 7.6　Dollar Baby 实测结果（2026-07-10）
+
+| # | 标题 | 时长 | 大小 | Cliffhanger |
+|---|------|------|------|-------------|
+| 01 | Campus Slut Exposed | 172 s | 52.6 MB | ep03_sc_02 |
+| 02 | Daughter in Danger | 179 s | 58.1 MB | ep11_sc_05 |
+| 03 | Seven-Year Secret Revealed | 163 s | 40.6 MB | ep27_sc_01 |
+| 04 | Photo Reveals Daughter | 204 s | 60.6 MB | ep39_sc_01 |
+| 05 | Protecting His Family | 169 s | 49.9 MB | ep43_sc_02 |
+| 06 | Future Wife Declared | 169 s | 51.0 MB | ep46_sc_01 |
+| 07 | Reunion and Revelation | 170 s | 46.3 MB | ep48_sc_05 |
+| 08 | Sister Revealed | 66 s | 18.9 MB | ep55_sc_01（大结局，无后续）|
+| 09 | Poisoning Accusation | 185 s | 50.8 MB | ep53_sc_03 |
+| 10 | Ultimatum to Save Daughter | 179 s | 52.9 MB | ep21_sc_01 |
+
+> **Clip 03（163 s）**：受限于 ep27_sc_01 长达 98 s，加入后总时长达 261 s 超过硬天花板，已是该锚点可达的最大时长。  
+> **Clip 08（66 s）**：ep54 为大结局集，后无可延伸剧情，属正常边界情况。
 
 ---
 

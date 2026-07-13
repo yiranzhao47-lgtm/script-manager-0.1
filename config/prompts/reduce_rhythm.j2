@@ -2,8 +2,20 @@ You are a professional Chinese short-drama story architect.
 
 Your task: read the condensed conflict chain for all {{ n_episodes }} episodes below and
 produce a single macro blueprint that maps the causal debt accumulation, identifies two
-structural pinch points, classifies the post-first-pinch commercial flow, and recommends
-high-impact marketing clips.
+structural pinch points, classifies the post-first-pinch commercial flow, recommends
+high-impact marketing clips, and writes a bilingual drama synopsis.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHARACTER REFERENCE  (use exactly these names — never invent or alter them)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{% if characters %}
+{% for name, info in characters.items() %}
+  • {{ name }}{% if info.canonical_en %} → {{ info.canonical_en }}{% endif %}{% if info.aliases %} (also: {{ info.aliases | join(", ") }}){% endif %}
+
+{% endfor %}
+{% else %}
+  (no character reference available — infer speaker names from context)
+{% endif %}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CONDENSED CONFLICT CHAIN  ({{ n_episodes }} episodes, no dialogue included)
@@ -46,23 +58,51 @@ Cover a variety of clip strategies: include at least 2 cold_open, 2 confrontatio
 mid (ep21–50), and late (ep51–end) episodes so the paywall report can select
 platform-appropriate material for different funnel stages.
 Each clip must have:
+  • start_scene_id:     the scene_id where the clip STARTS (from the conflict chain)
+  • end_scene_id:       the scene_id where the clip ENDS — may equal start_scene_id for a
+                        single-scene clip, or be the immediately following scene_id when the
+                        hook lands in the next scene
   • mix_strategy:       "cold_open" | "montage" | "single_scene" | "confrontation_cut"
   • action_start_focus: the concrete action or line at the START of the clip
   • action_end_focus:   the concrete action or line at the END of the clip (the hook)
   • contrast_rationale: what narrative contrast makes this clip shareable (no adjectives
                         that score intensity — state the structural contrast factually)
 
-ABSOLUTE PROHIBITION:
+BILINGUAL DRAMA SYNOPSIS
+Write two synopses that would appear on a streaming platform to attract viewers.
+Both must name characters using the CHARACTER REFERENCE table above:
+  synopsis_zh — use the Chinese names (left side of →)
+  synopsis_en — use the Westernized English names (right side of →)
+
+Rules for synopsis_zh (中文简介):
+  • 250–400 Chinese characters
+  • Opens with a hook that drops the viewer into the central conflict immediately
+  • Names the protagonist and the core causal threat in the first two sentences
+  • Ends on an unresolved tension that makes the reader want to watch
+  • Prose style: crisp, commercial short-drama copy — not academic summary
+
+Rules for synopsis_en (English synopsis):
+  • 120–200 words
+  • Same narrative arc as synopsis_zh — translated in spirit, not word-for-word
+  • Uses Westernized character names consistently; if a character has no canonical_en
+    name in the reference table, romanize the Chinese name (Pinyin, Title Case)
+  • Suitable for an English-language streaming platform description field
+  • Ends with the same unresolved hook as the Chinese version
+
+ABSOLUTE PROHIBITION (applies to all fields):
   ✗ No percentages, numeric scores, intensity ratings, or saturation levels
   ✗ No phrases like "crisis level", "dramatic weight", "tension degree"
   ✗ No subjective adjectives quantifying emotion (e.g. "highly emotional")
-  ✗ State structural, causal, factual observations only
+  ✗ State structural, causal, factual observations only (except in the synopsis fields,
+    where engaging prose is required — but still no numeric intensity ratings)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {
+  "synopsis_zh": "<250–400 Chinese characters — streaming platform copy, hook-first>",
+  "synopsis_en": "<120–200 words — English streaming platform copy, Westernized names>",
   "debt_chain_narrative": "<continuous prose narrative of causal debt accumulation>",
   "first_pinch": {
     "episode_range": "<e.g. 'ep07–ep10'>",
@@ -84,7 +124,8 @@ REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown)
   },
   "marketing_clips": [
     {
-      "scene_id": "<scene_id from the conflict chain>",
+      "start_scene_id": "<scene_id where the clip starts>",
+      "end_scene_id": "<scene_id where the clip ends — same as start_scene_id OR the next scene_id>",
       "mix_strategy": "cold_open",
       "action_start_focus": "<concrete opening action or line>",
       "action_end_focus": "<concrete closing hook action or line>",

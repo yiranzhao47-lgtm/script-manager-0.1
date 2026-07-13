@@ -25,7 +25,7 @@ same_lang:
       word_low_conf_threshold: 0.40   # per-word probability below this → word flagged as low_confidence
   ocr:
     fps: 2                  # frames per second sampled for OCR
-    roi: [0.602, 0.6933]    # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
+    roi: [0.78, 0.94]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
     language: "en"          # PaddleOCR language code — "ch" for Chinese, "en" for English
     use_gpu: true
     min_line_confidence: 0.50   # discard OCR text boxes with confidence below this value
@@ -107,11 +107,18 @@ lang_detection:
   fatal_on_mismatch: true         # abort pipeline on mode / video-language conflict
 
 # ── File system paths ─────────────────────────────────────────────────────────
+# When a drama_name is passed on the CLI (e.g. python pipeline.py "dollar baby"),
+# all four paths below are auto-derived and these values are IGNORED:
+#   raw_video_dir  → data/raw/<drama_name>/
+#   cache_dir      → data/cache/<drama_name>/       (per-drama isolated)
+#   meta_dir       → data/meta/<drama_name>/        (per-drama isolated)
+#   output_dir     → data/output/<drama_name>/
+# These values only act as fallback when pipeline.py is called with no arguments.
 paths:
-  raw_video_dir: "data/raw/dollar baby"          # source video files (01.mp4, 02.mp4, …)
-  cache_dir: "data/cache"                         # intermediate cache (asr/, ocr/, aligned/, map_batches/)
-  meta_dir: "data/meta"                           # meta_raw.json + meta.json (human-review checkpoint)
-  output_dir: "data/output/dollar baby"           # show-specific output root; {source_language}/ subdir holds main SRTs
+  raw_video_dir: "data/raw/dollar baby"          # fallback: source video files
+  cache_dir: "data/cache/dollar baby"            # fallback: intermediate cache
+  meta_dir: "data/meta/dollar baby"              # fallback: meta_raw.json + meta.json
+  output_dir: "data/output/dollar baby"          # fallback: show-specific output root
 
 # ── Layer 5 Intelligence — drama rhythm analysis ─────────────────────────────
 intelligence:
@@ -133,6 +140,10 @@ intelligence:
                                 # Note: auto-disabled when pipeline.source_language == "en"
     target_languages: ["fr", "es"]    # French + Spanish produced alongside English by default
     genre_glossary_path: "data/meta/fantasy_glossary.json"  # optional; silently skipped if missing
+
+  # ── Marketing clip generation (Stage 6) ──────────────────────────────────────
+  creatives:
+    enabled: true              # auto-run extract→plan→assemble after drama analysis
 
 # ── FinOps pricing (unit: CNY / million tokens) ───────────────────────────────
 # Claude rates assume ¥7.25/USD; update if exchange rate shifts significantly.

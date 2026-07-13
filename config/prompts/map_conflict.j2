@@ -32,18 +32,23 @@ EXTRACTION RULES
 2. SCENE ID FORMAT: "ep{{ episode_id }}_sc_01", "ep{{ episode_id }}_sc_02", etc.
    Always zero-pad to two digits.
 
-3. scene_actions: a list of concrete facts about what characters DO or DECIDE
+3. scene_start_time / scene_end_time: copy the SRT timestamp of the FIRST subtitle
+   line of the scene into scene_start_time, and the END timestamp of the LAST
+   subtitle line into scene_end_time.  Use the exact SRT format: HH:MM:SS,mmm
+   (e.g. "00:03:12,480").  These are used for video clip extraction.
+
+4. scene_actions: a list of concrete facts about what characters DO or DECIDE
    in this scene. State facts — do not evaluate or judge intensity.
 
-4. unresolved_debt: the specific causal obligation, secret, or threat that this
+5. unresolved_debt: the specific causal obligation, secret, or threat that this
    scene leaves hanging. One sentence, factual.  If nothing is left unresolved,
    write null.
 
-5. pivot_signals: words, actions, or revelations in this scene that will
+6. pivot_signals: words, actions, or revelations in this scene that will
    structurally reverberate in later episodes. Be specific (e.g. "X learns that
    Y has the contract").  Empty list if none.
 
-6. structured_dialogues: for lines that reveal character intent, hidden
+7. structured_dialogues: for lines that reveal character intent, hidden
    knowledge, or power shifts, capture them with the speaker name from the
    KNOWN CHARACTERS list above.  Assign "UNKNOWN" only when you truly cannot
    infer the speaker.  Omit trivial filler lines.
@@ -65,6 +70,8 @@ REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown)
       "scene_id": "ep{{ episode_id }}_sc_01",
       "location": "<where the scene takes place>",
       "time": "<time of day or temporal marker, e.g. 'morning', 'that night', 'three days later'>",
+      "scene_start_time": "<HH:MM:SS,mmm — start timestamp of first subtitle in this scene>",
+      "scene_end_time": "<HH:MM:SS,mmm — end timestamp of last subtitle in this scene>",
       "scene_actions": [
         "<action or decision — factual, causal>",
         "..."

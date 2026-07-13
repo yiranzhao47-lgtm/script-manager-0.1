@@ -169,14 +169,33 @@ class ASRRunner:
     def run_episode(self, video_path: Path, episode_id: str) -> Path:
         """
         Transcribe one episode.  Returns path to output JSON.
-        Skips silently if the cache file already exists.
+        Skips silently if the cache file already exists and was produced with
+        the same ASR language.  Stale cache (different language) is deleted and
+        the episode is re-transcribed so a language-config change is never
+        silently ignored.
 
         Raises FileNotFoundError if video_path does not exist.
         """
         out_path = self._cache_dir / f"{episode_id}_asr.json"
         if out_path.exists():
-            logger.info("ASR cache hit — [%s] skipped", episode_id)
-            return out_path
+            try:
+                cached = json.loads(out_path.read_text(encoding="utf-8"))
+                cached_lang = cached.get("asr_language")
+                if cached_lang is not None and cached_lang != self._language:
+                    logger.warning(
+                        "ASR cache language mismatch [%s]: cached=%s current=%s"
+                        " — discarding stale cache and re-transcribing",
+                        episode_id, cached_lang, self._language,
+                    )
+                    out_path.unlink()
+                else:
+                    logger.info("ASR cache hit — [%s] skipped", episode_id)
+                    return out_path
+            except (json.JSONDecodeError, OSError):
+                logger.warning(
+                    "ASR cache unreadable for [%s] — regenerating", episode_id
+                )
+                out_path.unlink(missing_ok=True)
 
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
@@ -324,6 +343,7 @@ class ASRRunner:
             "episode": episode_id,
             "source": str(video_path),
             "model": self._model_name,
+            "asr_language": self._language,
             "role": self._role,
             "segment_count": len(segments),
             "segments": [self._seg_to_dict(s) for s in segments],

@@ -37,6 +37,7 @@ import datetime
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +45,15 @@ from src.execution.srt_validator import SRTValidator
 from src.utils.llm_client import LLMClient, LLMCallError
 
 logger = logging.getLogger(__name__)
+
+
+def _tqdm_error(msg: str) -> None:
+    """Write an error line that survives tqdm's terminal clearing."""
+    try:
+        from tqdm import tqdm
+        tqdm.write(msg, file=sys.stderr)
+    except ImportError:
+        print(msg, file=sys.stderr, flush=True)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "prompts"
 
@@ -282,9 +292,12 @@ class EpisodeRefiner:
         seen master or context text (subtitle lingering on screen from the
         previous dialogue line; alignment captures it at the wrong segment).
 
-        Hallucination guard — when a long ASR phrase (≥8 chars) has already
-        appeared 3+ times and OCR shows different content, substitute the OCR
-        text as master_text (Whisper repeating earlier audio = hallucination).
+        Hallucination guard — two independent triggers, both require OCR context:
+          (a) Phrase-loop: a long ASR phrase (≥8 chars) has appeared ≥3 times
+              (Whisper repeating earlier audio in silence / BGM).
+          (b) Risk flag: ASR runner set hallucination_risk=True for this segment
+              (avg_probability below threshold — Whisper was not confident).
+        Either trigger causes the OCR context to replace the ASR master text.
         """
         phrase_counts: dict[str, int] = {}
         recent_seen: list[tuple[str, str]] = []  # (master, ctx) last 5 segs
@@ -304,10 +317,11 @@ class EpisodeRefiner:
 
             # Hallucination guard
             effective_master = master
-            if (ctx_avail and ctx and ctx != master
-                    and len(master) >= 8
-                    and phrase_counts.get(master, 0) >= 3):
-                effective_master = ctx
+            if ctx_avail and ctx and ctx != master:
+                phrase_loop = len(master) >= 8 and phrase_counts.get(master, 0) >= 3
+                risk_flag   = seg.get("hallucination_risk", False)
+                if phrase_loop or risk_flag:
+                    effective_master = ctx
 
             phrase_counts[master] = phrase_counts.get(master, 0) + 1
             recent_seen = (recent_seen + [(master, ctx if ctx_avail else "")])[-5:]
@@ -413,10 +427,9 @@ class EpisodeRefiner:
             response = _strip_markdown_fence(response)
             return response
         except LLMCallError as exc:
-            logger.error(
-                "EpisodeRefiner: %s — LLM call #%d failed: %s",
-                episode_id, attempt, exc,
-            )
+            msg = f"EpisodeRefiner: {episode_id} — LLM call #{attempt} failed: {exc}"
+            logger.error(msg)
+            _tqdm_error(f"ERROR  {msg}")
             return None
 
     # ------------------------------------------------------------------ #

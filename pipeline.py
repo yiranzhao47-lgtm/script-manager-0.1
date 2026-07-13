@@ -26,6 +26,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import logging
 import re
@@ -50,6 +51,34 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger("pipeline")
+
+# ── Project root (resolved once at import time) ───────────────────────────────
+_ROOT = Path(__file__).resolve().parent
+
+# ── Windows sleep prevention ──────────────────────────────────────────────────
+# ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+_ES_CONTINUOUS       = 0x80000000
+_ES_SYSTEM_REQUIRED  = 0x00000001
+_ES_DISPLAY_REQUIRED = 0x00000002
+
+
+def _prevent_sleep() -> None:
+    """Tell Windows not to sleep or turn off the display while pipeline runs."""
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
+        )
+        logger.info("Sleep prevention enabled (SetThreadExecutionState)")
+    except Exception:
+        pass  # Non-Windows or restricted environment — silently skip
+
+
+def _allow_sleep() -> None:
+    """Restore normal Windows sleep behaviour after pipeline finishes."""
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
+    except Exception:
+        pass
 
 # ── Supported video extensions ────────────────────────────────────────────────
 _VIDEO_EXTS: frozenset[str] = frozenset(
@@ -76,6 +105,93 @@ def _natural_key(path: Path) -> list:
 def load_config(cfg_path: Path) -> dict:
     with cfg_path.open(encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _derive_paths(drama_name: str, cfg: dict) -> dict:
+    """Return a copy of cfg with the paths section overridden for drama_name."""
+    cfg = {**cfg, "paths": {**cfg.get("paths", {})}}
+    cfg["paths"]["raw_video_dir"] = str(_ROOT / "data" / "raw"    / drama_name)
+    cfg["paths"]["cache_dir"]     = str(_ROOT / "data" / "cache"  / drama_name)
+    cfg["paths"]["meta_dir"]      = str(_ROOT / "data" / "meta"   / drama_name)
+    cfg["paths"]["output_dir"]    = str(_ROOT / "data" / "output" / drama_name)
+    return cfg
+
+
+def _apply_lang_for_mode(cfg: dict, source_language: str) -> None:
+    """
+    Set pipeline.source_language and update the active mode's ASR/OCR language
+    keys in-place.
+
+    For same_lang: both ASR and OCR language follow source_language.
+    For cross_lang: source_language records the subtitle language (en) but ASR
+    must remain Chinese (zh audio) — so we only update OCR, not ASR.
+    The cross_lang.asr section already has no explicit language key, which
+    causes ASRRunner to default to "zh" (correct for Chinese audio).
+    """
+    cfg["pipeline"]["source_language"] = source_language
+    mode = cfg["pipeline"]["mode"]
+    mode_cfg = cfg.setdefault(mode, {})
+
+    if mode == "cross_lang":
+        # OCR always targets the subtitle script (en for cross_lang)
+        mode_cfg.setdefault("ocr", {})["language"] = "en"
+        # Do NOT override ASR language — ASRRunner defaults to "zh" when absent
+    else:
+        asr_lang = "zh" if source_language == "zh" else "en"
+        ocr_lang = "ch" if source_language == "zh" else "en"
+        mode_cfg.setdefault("asr", {})["language"] = asr_lang
+        mode_cfg.setdefault("ocr", {})["language"] = ocr_lang
+
+
+def _discover_dramas(raw_base: Path) -> list[str]:
+    """Return sorted list of drama names (immediate subdirectory names)."""
+    if not raw_base.exists():
+        return []
+    return sorted(d.name for d in raw_base.iterdir() if d.is_dir())
+
+
+def _is_drama_complete(drama_name: str) -> bool:
+    """Return True if the drama's checkpoint shows all pipeline stages done."""
+    ckpt_path = _ROOT / "data" / "cache" / drama_name / "checkpoint.json"
+    if not ckpt_path.exists():
+        return False
+    try:
+        with ckpt_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        g = data.get("global", {})
+        if not (g.get("map_done") and g.get("reduce_done")):
+            return False
+        # Also verify no new video files were added since last run
+        video_list = set(g.get("video_list", []))
+        raw_dir = _ROOT / "data" / "raw" / drama_name
+        current_videos = {
+            v.name for v in raw_dir.iterdir()
+            if v.suffix.lower() in _VIDEO_EXTS
+        } if raw_dir.exists() else set()
+        return current_videos == video_list
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _apply_source_language(cfg: dict, source_language: str) -> dict:
+    """
+    Return a copy of cfg with source_language and all derived language keys
+    (ASR language, OCR language) set consistently.
+    """
+    cfg  = {**cfg}
+    cfg["pipeline"] = {**cfg.get("pipeline", {}), "source_language": source_language}
+    mode = cfg["pipeline"]["mode"]
+    mode_cfg = {**cfg.get(mode, {})}
+    mode_cfg["asr"] = {**mode_cfg.get("asr", {})}
+    mode_cfg["ocr"] = {**mode_cfg.get("ocr", {})}
+    if source_language == "zh":
+        mode_cfg["asr"]["language"] = "zh"
+        mode_cfg["ocr"]["language"] = "ch"
+    else:
+        mode_cfg["asr"]["language"] = "en"
+        mode_cfg["ocr"]["language"] = "en"
+    cfg[mode] = mode_cfg
+    return cfg
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -184,6 +300,9 @@ class ShortDramaPipeline:
         # ── Stage 1+2: Ingestion + Alignment ──────────────────────────────
         self._phase_ingestion(episodes)
 
+        # ── ASR language sanity check (fail-fast before any LLM tokens) ───
+        self._validate_asr_language(episodes)
+
         # ── Stage 3: MapReduce ─────────────────────────────────────────────
         meta = self._phase_map_reduce(episode_ids)
 
@@ -210,6 +329,9 @@ class ShortDramaPipeline:
 
         # ── Stage 5: Drama Rhythm Analysis (optional) ─────────────────────
         self._phase_rhythm_analysis(episode_ids, meta)
+
+        # ── Stage 6: Creatives (marketing clips) ──────────────────────────
+        self._phase_creatives()
 
         # ── FinOps: emit cost report ───────────────────────────────────────
         from src.intelligence.cost_auditor import CostAuditor
@@ -358,6 +480,83 @@ class ShortDramaPipeline:
         if not self._ckpt.is_at_least(ep_id, "aligned"):
             aligner.run_episode(ep_id)
             self._ckpt.set_state(ep_id, "aligned")
+
+    # ------------------------------------------------------------------ #
+    #  ASR language validation (between Stage 2 and Stage 3)              #
+    # ------------------------------------------------------------------ #
+
+    def _validate_asr_language(self, episodes: list[tuple[str, Path]]) -> None:
+        """
+        Fail-fast guard: verify ASR output language matches source_language
+        before any LLM tokens are spent.
+
+        Whisper produces fluent-sounding hallucinated English when forced with
+        language="en" on Chinese audio — CJK ratio of the transcript exposes
+        this mismatch immediately. Aborts with a clear, actionable error
+        message instead of silently burning the entire refinement budget.
+        """
+        from src.utils.lang_detector import cjk_ratio as _cjk_ratio
+
+        source_language = self._cfg["pipeline"].get("source_language", "zh")
+        asr_dir = self._cache_dir / "asr"
+
+        # Collect sample text from the first 3 episodes for robustness
+        sample_text = ""
+        for ep_id, _ in episodes[:3]:
+            asr_path = asr_dir / f"{ep_id}_asr.json"
+            if not asr_path.exists():
+                continue
+            try:
+                data = json.loads(asr_path.read_text(encoding="utf-8"))
+                segs = data.get("segments", [])
+                sample_text += " ".join(s.get("text", "") for s in segs)
+                if len(sample_text.strip()) >= 100:
+                    break
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        if len(sample_text.strip()) < 20:
+            logger.warning(
+                "ASR language validation skipped — not enough sample text "
+                "(ASR may have produced 0 segments)"
+            )
+            return
+
+        ratio = _cjk_ratio(sample_text)
+        logger.info(
+            "ASR language validation — source_language=%s  cjk_ratio=%.3f  "
+            "sample_len=%d chars",
+            source_language, ratio, len(sample_text),
+        )
+
+        if source_language == "zh" and ratio < 0.20:
+            raise RuntimeError(
+                f"\n"
+                f"  ╔══ ASR LANGUAGE MISMATCH — ABORTING BEFORE LLM STAGE ══╗\n"
+                f"  ║  Configured: source_language='zh'                      ║\n"
+                f"  ║  Detected:   CJK ratio={ratio:.1%} (expected >20%)        ║\n"
+                f"  ║                                                         ║\n"
+                f"  ║  Whisper produced English-looking text from Chinese     ║\n"
+                f"  ║  audio — language= was likely set to 'en' when the      ║\n"
+                f"  ║  ASR cache was written.                                 ║\n"
+                f"  ║                                                         ║\n"
+                f"  ║  Fix: delete data/cache/<drama>/asr/ and re-run.        ║\n"
+                f"  ╚═════════════════════════════════════════════════════════╝"
+            )
+
+        if source_language == "en" and ratio > 0.60:
+            raise RuntimeError(
+                f"\n"
+                f"  ╔══ ASR LANGUAGE MISMATCH — ABORTING BEFORE LLM STAGE ══╗\n"
+                f"  ║  Configured: source_language='en'                      ║\n"
+                f"  ║  Detected:   CJK ratio={ratio:.1%} (expected <60%)        ║\n"
+                f"  ║                                                         ║\n"
+                f"  ║  ASR output is predominantly Chinese — check pipeline   ║\n"
+                f"  ║  mode or audio language detection result.               ║\n"
+                f"  ║                                                         ║\n"
+                f"  ║  Fix: delete data/cache/<drama>/asr/ and re-run.        ║\n"
+                f"  ╚═════════════════════════════════════════════════════════╝"
+            )
 
     # ------------------------------------------------------------------ #
     #  Stage 3: MapReduce                                                  #
@@ -531,6 +730,78 @@ class ShortDramaPipeline:
             )
 
     # ------------------------------------------------------------------ #
+    #  Stage 6: Creatives (marketing clip generation)                      #
+    # ------------------------------------------------------------------ #
+
+    def _phase_creatives(self) -> None:
+        """
+        Run extract → plan → assemble when intelligence.creatives.enabled is true.
+
+        Prerequisite: drama_structure_graph.json must exist (Stage 5 output).
+        Each step has an idempotency guard so re-runs are safe.
+        """
+        enabled = (
+            self._cfg.get("intelligence", {})
+            .get("creatives", {})
+            .get("enabled", False)
+        )
+        if not enabled:
+            logger.info(
+                "▶ [6/6] Creatives — disabled "
+                "(set intelligence.creatives.enabled: true to activate)"
+            )
+            return
+
+        drama_name = self._output_dir.name
+        graph_path = self._output_dir / "drama_structure_graph.json"
+        if not graph_path.exists():
+            logger.warning(
+                "▶ [6/6] Creatives — skipped: drama_structure_graph.json not found "
+                "(Stage 5 must complete successfully first)"
+            )
+            return
+
+        logger.info("▶ [6/6] Creatives — starting  drama=%s", drama_name)
+
+        from scripts.extract_clips import main as _extract
+        from scripts.plan_clips   import main as _plan
+        from scripts.assemble_clips import main as _assemble
+
+        # Step 1: extract anchor clips (idempotent ffmpeg, fast)
+        logger.info("   [6/6] Step 1/3 — extracting anchor clips")
+        rc = _extract(drama_name)
+        if rc != 0:
+            logger.error("   [6/6] extract_clips failed (rc=%d) — skipping plan+assemble", rc)
+            return
+
+        # Step 2: LLM clip planning (skip if plans already exist)
+        plans_path = self._output_dir / "clip_plans.json"
+        if plans_path.exists():
+            logger.info("   [6/6] Step 2/3 — clip_plans.json already exists, skipping LLM planning")
+        else:
+            logger.info("   [6/6] Step 2/3 — running LLM clip planner")
+            rc = _plan(drama_name)
+            if rc != 0:
+                logger.error("   [6/6] plan_clips failed (rc=%d) — skipping assemble", rc)
+                return
+
+        # Step 3: assemble ext_*.mp4 (skip if already assembled)
+        existing = list((self._output_dir / "creatives").glob("ext_*.mp4"))
+        if existing:
+            logger.info(
+                "   [6/6] Step 3/3 — %d assembled clip(s) already exist, skipping",
+                len(existing),
+            )
+        else:
+            logger.info("   [6/6] Step 3/3 — assembling final marketing clips")
+            rc = _assemble(drama_name, None)
+            if rc != 0:
+                logger.error("   [6/6] assemble_clips failed (rc=%d)", rc)
+                return
+
+        logger.info("   [6/6] Creatives done → %s/creatives/", self._output_dir)
+
+    # ------------------------------------------------------------------ #
     #  Utilities                                                           #
     # ------------------------------------------------------------------ #
 
@@ -575,31 +846,47 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # First run — same_lang mode, videos in data/raw/:
+  # Run a single drama by name (videos in data/raw/<drama_name>/):
+  python pipeline.py "dollar baby"
+
+  # Process ALL dramas found in data/raw/ sequentially:
+  python pipeline.py --all
+
+  # Backward compat — reads paths.raw_video_dir from settings.yaml:
   python pipeline.py
 
-  # Switch to cross_lang (English subs) without editing settings.yaml:
-  python pipeline.py --mode cross_lang
+  # Switch to cross_lang without editing settings.yaml:
+  python pipeline.py "dollar baby" --mode cross_lang
 
   # Resume after a crash (checkpoint auto-skips completed episodes):
-  python pipeline.py
-
-  # Point to a different video folder:
-  python pipeline.py --video-dir /mnt/nas/drama_ep01-80
+  python pipeline.py "dollar baby"
 
   # Skip lang detection (already verified, want a faster restart):
-  python pipeline.py --skip-preflight
-
-  # Use a custom config:
-  python pipeline.py --config config/my_project.yaml
+  python pipeline.py "dollar baby" --skip-preflight
 
   # Skip the cost-estimate confirmation prompt (CI / batch runs):
-  python pipeline.py --yes
+  python pipeline.py "dollar baby" --yes
 
   # Translate already-refined episodes (no GPU required):
-  python pipeline.py --translate-only
-  python pipeline.py --translate-only --episodes 01,02,05
+  python pipeline.py "dollar baby" --translate-only
+  python pipeline.py "dollar baby" --translate-only --episodes 01,02,05
         """,
+    )
+    parser.add_argument(
+        "drama_name",
+        nargs="?",
+        default=None,
+        metavar="DRAMA_NAME",
+        help=(
+            "Name of the drama to process — must match a subdirectory under "
+            "data/raw/.  All cache/meta/output paths are derived automatically. "
+            "Omit to fall back to paths.raw_video_dir in settings.yaml."
+        ),
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Process every drama directory found under data/raw/ sequentially.",
     )
     parser.add_argument(
         "--config",
@@ -799,6 +1086,86 @@ def _run_paywall_report(cfg: dict) -> None:
     logger.info("Paywall report complete → %s", out_path)
 
 
+def _run_single(
+    drama_name: str,
+    base_cfg: dict,
+    args: argparse.Namespace,
+    cfg_path: Path,
+) -> None:
+    """Run the full pipeline (or a sub-mode) for a single drama."""
+    cfg = _derive_paths(drama_name, base_cfg)
+
+    # ── Auto-detect pipeline mode and source_language from video content ────
+    # When --mode is given, we trust the user and only auto-detect language.
+    # When --mode is absent, we also auto-detect mode (same_lang vs cross_lang)
+    # by sampling both subtitle OCR and a 30-second audio clip.
+    from src.utils.lang_detector import detect_language, detect_pipeline_mode
+    video_dir_detect = Path(cfg["paths"]["raw_video_dir"])
+
+    if args.mode:
+        cfg["pipeline"]["mode"] = args.mode
+        logger.info("Mode overridden via --mode: %s", args.mode)
+        detected_lang = detect_language(video_dir_detect, cfg)
+        logger.info(
+            "Auto-detected source_language='%s' for '%s'",
+            detected_lang, drama_name,
+        )
+        _apply_lang_for_mode(cfg, detected_lang)
+    else:
+        detected_mode, detected_lang = detect_pipeline_mode(video_dir_detect, cfg)
+        configured_mode = cfg["pipeline"].get("mode", "same_lang")
+        configured_lang = cfg["pipeline"].get("source_language", "zh")
+        if detected_mode != configured_mode:
+            logger.info(
+                "Auto-detected mode='%s' for '%s' (settings.yaml had '%s') — overriding",
+                detected_mode, drama_name, configured_mode,
+            )
+        if detected_lang != configured_lang:
+            logger.info(
+                "Auto-detected source_language='%s' for '%s' (settings.yaml had '%s') — overriding",
+                detected_lang, drama_name, configured_lang,
+            )
+        cfg["pipeline"]["mode"] = detected_mode
+        _apply_lang_for_mode(cfg, detected_lang)
+
+    # ── Paywall report shortcut ───────────────────────────────────────────
+    if args.paywall_report:
+        _run_paywall_report(cfg)
+        return
+
+    # ── Translation-only shortcut ─────────────────────────────────────────
+    if args.translate_only:
+        episode_filter = (
+            [ep.strip() for ep in args.episodes.split(",") if ep.strip()]
+            if args.episodes else None
+        )
+        _run_translation_only(cfg, episode_filter=episode_filter)
+        return
+
+    # ── Auto-detect show change and self-heal ROI ─────────────────────────
+    from src.utils.project_initializer import ProjectInitializer
+    ProjectInitializer(cfg).auto_detect_and_heal()
+    # Reload settings.yaml in case the ROI was just patched by the initializer,
+    # then re-derive drama paths (yaml only stores non-path settings like ROI).
+    # Re-apply the auto-detected mode/language so the reload doesn't lose them.
+    resolved_mode = cfg["pipeline"]["mode"]
+    resolved_lang = cfg["pipeline"]["source_language"]
+    base_cfg_reloaded = load_config(cfg_path)
+    cfg = _derive_paths(drama_name, base_cfg_reloaded)
+    cfg["pipeline"]["mode"] = resolved_mode
+    _apply_lang_for_mode(cfg, resolved_lang)
+
+    video_dir = Path(args.video_dir) if args.video_dir else None
+
+    pipeline = ShortDramaPipeline(cfg)
+    pipeline.run(video_dir=video_dir, skip_preflight=args.skip_preflight, yes=args.yes)
+
+    # ── Stage 6: Translation (auto-runs when intelligence.translation.enabled) ─
+    translation_cfg = cfg.get("intelligence", {}).get("translation", {})
+    if translation_cfg.get("enabled", False):
+        _run_translation_only(cfg)
+
+
 def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
@@ -808,42 +1175,48 @@ def main() -> None:
         logger.error("Config file not found: %s", cfg_path)
         sys.exit(1)
 
-    cfg = load_config(cfg_path)
+    base_cfg = load_config(cfg_path)
 
-    # Apply CLI overrides
-    if args.mode:
-        cfg["pipeline"]["mode"] = args.mode
-        logger.info("Mode overridden via --mode: %s", args.mode)
-
-    # ── Paywall report shortcut ───────────────────────────────────────────
-    if args.paywall_report:
-        _run_paywall_report(cfg)
+    # ── Resolve drama_name and dispatch ──────────────────────────────────────
+    if args.all:
+        raw_base = _ROOT / "data" / "raw"
+        dramas = _discover_dramas(raw_base)
+        if not dramas:
+            logger.error("No drama directories found in %s", raw_base)
+            sys.exit(1)
+        logger.info("--all: found %d drama(s): %s", len(dramas), dramas)
+        pending = [d for d in dramas if not _is_drama_complete(d)]
+        skipped = [d for d in dramas if _is_drama_complete(d)]
+        if skipped:
+            logger.info("--all: skipping %d already-complete drama(s): %s", len(skipped), skipped)
+        if not pending:
+            logger.info("--all: all dramas already complete — nothing to do")
+            return
+        logger.info("--all: %d drama(s) to process: %s", len(pending), pending)
+        # Batch mode is always unattended — suppress the per-drama dry-run prompt.
+        args.yes = True
+        for drama_name in pending:
+            logger.info(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            logger.info("Drama: %s", drama_name)
+            _run_single(drama_name, base_cfg, args, cfg_path)
         return
 
-    # ── Translation-only shortcut (no GPU, no preflight, no main pipeline) ───
-    if args.translate_only:
-        episode_filter = (
-            [ep.strip() for ep in args.episodes.split(",") if ep.strip()]
-            if args.episodes else None
-        )
-        _run_translation_only(cfg, episode_filter=episode_filter)
-        return
+    if args.drama_name:
+        drama_name = args.drama_name
+    elif args.video_dir:
+        # --video-dir given but no positional: derive drama name from folder name
+        drama_name = Path(args.video_dir).name
+    else:
+        # Backward compat: read from settings.yaml
+        drama_name = Path(base_cfg["paths"]["raw_video_dir"]).name
 
-    # ── Auto-detect show change and self-heal ROI (must run before any stage) ──
-    from src.utils.project_initializer import ProjectInitializer
-    ProjectInitializer(cfg).auto_detect_and_heal()
-    # Reload settings.yaml in case the ROI was just patched by the initializer
-    cfg = load_config(cfg_path)
-    if args.mode:
-        cfg["pipeline"]["mode"] = args.mode
-
-    video_dir = Path(args.video_dir) if args.video_dir else None
-
-    pipeline = ShortDramaPipeline(cfg)
-    pipeline.run(video_dir=video_dir, skip_preflight=args.skip_preflight, yes=args.yes)
+    _run_single(drama_name, base_cfg, args, cfg_path)
 
 
 if __name__ == "__main__":
+    _prevent_sleep()
     try:
         main()
     except KeyboardInterrupt:
@@ -853,4 +1226,6 @@ if __name__ == "__main__":
         raise
     except Exception:
         logger.exception("Unhandled exception — pipeline aborted")
+    finally:
+        _allow_sleep()
         sys.exit(1)

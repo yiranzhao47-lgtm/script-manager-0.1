@@ -311,6 +311,45 @@ class TestFormatSegments:
         data = json.loads(r._format_segments(segs))
         assert data[3]["master_text"] == "正确字幕"
 
+    def test_hallucination_risk_flag_promotes_ctx_on_first_occurrence(self, tmp_path):
+        """hallucination_risk=True overrides master even before phrase repeats 3 times."""
+        r = _make_refiner(tmp_path)
+        seg = {
+            "start": 1.0, "end": 2.0,
+            "master_text": "低置信度的识别",
+            "context_text": "真实字幕内容",
+            "context_available": True,
+            "hallucination_risk": True,
+        }
+        data = json.loads(r._format_segments([seg]))
+        assert data[0]["master_text"] == "真实字幕内容"
+
+    def test_hallucination_risk_false_keeps_master(self, tmp_path):
+        """hallucination_risk=False does not trigger substitution (phrase only seen once)."""
+        r = _make_refiner(tmp_path)
+        seg = {
+            "start": 1.0, "end": 2.0,
+            "master_text": "正常识别结果",
+            "context_text": "不同的字幕",
+            "context_available": True,
+            "hallucination_risk": False,
+        }
+        data = json.loads(r._format_segments([seg]))
+        assert data[0]["master_text"] == "正常识别结果"
+
+    def test_hallucination_risk_without_ctx_keeps_master(self, tmp_path):
+        """hallucination_risk=True but no valid OCR → master unchanged (no OCR to fall back to)."""
+        r = _make_refiner(tmp_path)
+        seg = {
+            "start": 1.0, "end": 2.0,
+            "master_text": "低置信度但无字幕",
+            "context_text": "",
+            "context_available": False,
+            "hallucination_risk": True,
+        }
+        data = json.loads(r._format_segments([seg]))
+        assert data[0]["master_text"] == "低置信度但无字幕"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Group 7 — EpisodeRefiner._assemble_fallback_srt

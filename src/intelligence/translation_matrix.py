@@ -466,10 +466,20 @@ class TranslationMatrix:
                 system=system, user=user, module_name="Translation_EN_Refine_Fill"
             )
             arr = extract_json_array(raw)
-            for item in arr:
+            has_idx = any(isinstance(item, dict) and "idx" in item for item in arr)
+            if not has_idx and arr:
+                logger.warning(
+                    "[%s][refined fill] LLM returned array without 'idx' fields — "
+                    "using positional matching against %d missing slots",
+                    ep_id, len(missing),
+                )
+            for pos, item in enumerate(arr):
                 if not isinstance(item, dict):
                     continue
-                idx = int(item.get("idx", -1))
+                if has_idx:
+                    idx = int(item.get("idx", -1))
+                else:
+                    idx = missing[pos] if pos < len(missing) else -1
                 text = str(item.get("text", "")).strip()
                 if text and 0 <= idx < len(result_arr):
                     result_arr[idx]["text"] = text
@@ -741,9 +751,17 @@ class TranslationMatrix:
         result = [{"idx": i, "text": ""} for i in range(expected_count)]
         placed = 0
         out_of_range = 0
+
+        has_idx = any(isinstance(item, dict) and "idx" in item for item in arr)
+        if not has_idx and arr:
+            logger.warning(
+                "[%s][%s] LLM returned array without 'idx' fields — using positional matching",
+                ep_id, step,
+            )
+
         for i, item in enumerate(arr):
             if isinstance(item, dict):
-                idx = int(item.get("idx", i))
+                idx = int(item.get("idx", i)) if has_idx else i
                 text = str(item.get("text", ""))
             else:
                 idx = i
@@ -807,10 +825,20 @@ class TranslationMatrix:
                 system=system, user=user, module_name="Translation_Fill"
             )
             arr = extract_json_array(raw)
-            for item in arr:
+            has_idx = any(isinstance(item, dict) and "idx" in item for item in arr)
+            if not has_idx and arr:
+                logger.warning(
+                    "[%s][skeleton fill] LLM returned array without 'idx' fields — "
+                    "using positional matching against %d missing slots",
+                    ep_id, len(missing),
+                )
+            for pos, item in enumerate(arr):
                 if not isinstance(item, dict):
                     continue
-                idx = int(item.get("idx", -1))
+                if has_idx:
+                    idx = int(item.get("idx", -1))
+                else:
+                    idx = missing[pos] if pos < len(missing) else -1
                 text = str(item.get("text", "")).strip()
                 if 0 <= idx < len(result_arr) and text:
                     result_arr[idx]["text"] = text

@@ -99,6 +99,11 @@ def _cjk_ratio(text: str) -> float:
     return sum(1 for c in chars if _is_cjk(c)) / len(chars)
 
 
+def cjk_ratio(text: str) -> float:
+    """Public: fraction of non-whitespace characters that are CJK ideographs."""
+    return _cjk_ratio(text)
+
+
 def _natural_sort_key(p: Path) -> tuple:
     """Sort filenames naturally: ep2 < ep10 < ep20."""
     parts = re.split(r"(\d+)", p.stem)
@@ -186,6 +191,25 @@ class LangDetector:
         report = self._finalize(report)
         self._check_mismatch(report)
         return report
+
+    def detect_only(self) -> str:
+        """
+        Detect dominant script without raising on mismatch.
+
+        Returns "cjk", "latin", or "unknown".
+        Used by auto-language detection before the pipeline is configured.
+        """
+        videos = self._discover_videos()
+        if not videos:
+            return "unknown"
+
+        report = DetectionReport(mode_configured=self._mode)
+        for vp in videos[: self._n_episodes]:
+            result = self._detect_episode(vp)
+            report.episodes.append(result)
+
+        report = self._finalize(report)
+        return report.detected_dominant
 
     # ------------------------------------------------------------------ #
     #  Per-episode detection                                               #
@@ -467,3 +491,113 @@ def run_preflight(cfg: dict, video_dir: Path) -> DetectionReport:
     Raises LanguageMismatchError if mismatch detected and fatal_on_mismatch=true.
     """
     return LangDetector(cfg, video_dir).run()
+
+
+def detect_language(video_dir: Path, cfg: dict) -> str:
+    """
+    Auto-detect source language from video subtitle frames.
+
+    Returns "zh" if CJK dominant, "en" otherwise.
+    Falls back to the configured source_language if OCR yields no text.
+
+    Always uses the Chinese OCR model (lang="ch") which handles both CJK and
+    Latin scripts, so detection works regardless of the configured language.
+    """
+    # Force Chinese OCR model — it recognises both CJK and Latin characters,
+    # giving a reliable CJK ratio for either script family.
+    detect_cfg = {**cfg, "pipeline": {**cfg.get("pipeline", {}), "source_language": "zh"}}
+    dominant = LangDetector(detect_cfg, video_dir).detect_only()
+
+    if dominant == "cjk":
+        return "zh"
+    if dominant == "latin":
+        return "en"
+    # "unknown" — OCR found no text; fall back to configured value
+    fallback = cfg.get("pipeline", {}).get("source_language", "zh")
+    logger.warning(
+        "detect_language: no OCR text found in '%s' — falling back to configured '%s'",
+        video_dir, fallback,
+    )
+    return fallback
+
+
+def detect_audio_language(video_path: Path) -> str:
+    """
+    Detect spoken language from the first 30 s of a video's audio track.
+
+    Uses faster-whisper 'tiny' model on CPU — loads in ~1 s, no GPU pressure.
+    Returns "zh" (any Sinitic variant), "en", or "unknown" on failure.
+    """
+    try:
+        from faster_whisper import WhisperModel
+        from faster_whisper.audio import decode_audio
+    except ImportError:
+        logger.warning("faster-whisper not available — audio language detection skipped")
+        return "unknown"
+
+    try:
+        audio = decode_audio(str(video_path), sampling_rate=16000)
+        audio_30s = audio[: 30 * 16000]
+
+        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        language, probability = model.detect_language(audio_30s)
+        logger.info(
+            "Audio language detected: %s (prob=%.2f)  file=%s",
+            language, probability, video_path.name,
+        )
+        if language in ("zh", "yue", "wuu", "cmn"):
+            return "zh"
+        if language == "en":
+            return "en"
+        return language
+    except Exception as exc:
+        logger.warning(
+            "detect_audio_language: failed for '%s' — %s", video_path.name, exc
+        )
+        return "unknown"
+
+
+def detect_pipeline_mode(video_dir: Path, cfg: dict) -> tuple[str, str]:
+    """
+    Auto-detect the correct pipeline mode and source_language for a drama.
+
+    Logic:
+      subtitle=zh                    → same_lang, source_language=zh
+      subtitle=en, audio=zh          → cross_lang, source_language=en
+      subtitle=en, audio=en/unknown  → same_lang, source_language=en
+
+    Returns (mode, source_language).
+    """
+    subtitle_lang = detect_language(video_dir, cfg)
+
+    if subtitle_lang == "zh":
+        logger.info("Pipeline mode auto-detected: same_lang (zh subtitle)")
+        return "same_lang", "zh"
+
+    # Subtitle is Latin/English — inspect audio to distinguish same_lang vs cross_lang
+    video_exts: frozenset[str] = frozenset(
+        {".mp4", ".mkv", ".avi", ".mov", ".flv", ".ts", ".m4v", ".wmv", ".mp2t"}
+    )
+    videos = sorted(
+        (p for p in video_dir.iterdir() if p.suffix.lower() in video_exts),
+        key=_natural_sort_key,
+    )
+    if not videos:
+        logger.warning(
+            "detect_pipeline_mode: no video files in '%s' — defaulting to same_lang/en",
+            video_dir,
+        )
+        return "same_lang", "en"
+
+    audio_lang = detect_audio_language(videos[0])
+
+    if audio_lang == "zh":
+        logger.info(
+            "Pipeline mode auto-detected: cross_lang (zh audio + en subtitle)"
+        )
+        return "cross_lang", "en"
+
+    logger.info(
+        "Pipeline mode auto-detected: same_lang (en audio + en subtitle)"
+    )
+    return "same_lang", "en"

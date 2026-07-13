@@ -51,6 +51,18 @@ def _natural_sort_key(ep_id: str) -> list:
     return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", ep_id)]
 
 
+def _episode_from_scene_id(scene_id: str) -> str:
+    """Extract zero-padded episode number from scene_id, e.g. 'ep04_sc_02' → '04'."""
+    m = re.match(r"ep(\d+)_sc_\d+", scene_id)
+    return m.group(1) if m else ""
+
+
+def _cache_has_timecodes(cached: dict) -> bool:
+    """Return True only if the cached map result already has scene-level timecodes."""
+    scenes = cached.get("scenes", [])
+    return bool(scenes) and "scene_start_time" in scenes[0]
+
+
 def _build_jinja_env():
     try:
         from jinja2 import Environment, FileSystemLoader
@@ -144,7 +156,7 @@ class RhythmAnalyzer:
             "RhythmAnalyzer: reduce phase — condensing %d episode(s)",
             len(conflict_map),
         )
-        blueprint = self._reduce_to_blueprint(conflict_map)
+        blueprint = self._reduce_to_blueprint(conflict_map, self._characters)
 
         return self._assemble_and_write(conflict_map, blueprint, len(episode_ids))
 
@@ -191,8 +203,13 @@ class RhythmAnalyzer:
                 with cache_path.open(encoding="utf-8") as f:
                     cached = json.load(f)
                 if "scenes" in cached and isinstance(cached["scenes"], list):
-                    logger.debug("RhythmAnalyzer: cache hit — %s", ep_id)
-                    return cached
+                    if _cache_has_timecodes(cached):
+                        logger.debug("RhythmAnalyzer: cache hit — %s", ep_id)
+                        return cached
+                    logger.info(
+                        "RhythmAnalyzer: [%s] cache lacks scene timecodes — re-analysing",
+                        ep_id,
+                    )
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning(
                     "RhythmAnalyzer: corrupt cache for [%s] — re-analysing.  %s",
@@ -265,7 +282,11 @@ class RhythmAnalyzer:
     #  Reduce phase                                                        #
     # ------------------------------------------------------------------ #
 
-    def _reduce_to_blueprint(self, conflict_map: dict[str, dict]) -> dict:
+    def _reduce_to_blueprint(
+        self,
+        conflict_map: dict[str, dict],
+        characters: dict | None = None,
+    ) -> dict:
         """
         Build the global macro blueprint from the condensed conflict chain.
 
@@ -281,6 +302,7 @@ class RhythmAnalyzer:
         user_prompt = template.render(
             n_episodes=n_episodes,
             conflict_chain=chain_text,
+            characters=characters or {},
         )
 
         logger.info(
@@ -314,7 +336,8 @@ class RhythmAnalyzer:
             return {}
 
         # Schema validation — warn on missing keys but return partial blueprint
-        _REQUIRED = ("debt_chain_narrative", "first_pinch", "second_pinch",
+        _REQUIRED = ("synopsis_zh", "synopsis_en",
+                     "debt_chain_narrative", "first_pinch", "second_pinch",
                      "post_first_pinch_flow", "marketing_clips")
         missing = [k for k in _REQUIRED if k not in blueprint]
         if missing:
@@ -379,6 +402,10 @@ class RhythmAnalyzer:
             for ep_id in sorted(conflict_map, key=_natural_sort_key)
         }
 
+        # Inject scene-level timecodes into marketing_clips
+        if blueprint:
+            self._enrich_clips_with_timecodes(blueprint, conflict_map)
+
         graph = {
             "total_episodes_analysed": len(conflict_map),
             "total_episodes_in_series": total_episodes,
@@ -395,3 +422,76 @@ class RhythmAnalyzer:
             out_path, len(conflict_map),
         )
         return graph
+
+    def _enrich_clips_with_timecodes(
+        self,
+        blueprint: dict,
+        conflict_map: dict[str, dict],
+    ) -> None:
+        """
+        Inject scene-level timecodes and explicit episode_id into every
+        marketing_clip entry.
+
+        Supports two clip schemas:
+          New: start_scene_id + end_scene_id (different scenes for start/end of clip)
+          Legacy: scene_id only (start and end both from the same scene)
+
+        Modifies blueprint["marketing_clips"] in-place.  Each clip gains:
+          episode_id      — zero-padded episode number string from start scene (e.g. "04")
+          clip_start_time — scene_start_time of start_scene_id (HH:MM:SS,mmm)
+          clip_end_time   — scene_end_time   of end_scene_id   (HH:MM:SS,mmm)
+
+        Clips whose scene_id(s) are not found in conflict_map receive empty strings
+        and a WARNING so the user knows to re-run Stage 5.
+        """
+        clips = blueprint.get("marketing_clips", [])
+        if not clips:
+            return
+
+        # Build scene_id → {episode_id, start, end} index from the Map results
+        scene_index: dict[str, dict] = {}
+        for ep_data in conflict_map.values():
+            ep_id = ep_data.get("episode_id", "")
+            for scene in ep_data.get("scenes", []):
+                sid = scene.get("scene_id", "")
+                if sid:
+                    scene_index[sid] = {
+                        "episode_id":      ep_id,
+                        "clip_start_time": scene.get("scene_start_time", ""),
+                        "clip_end_time":   scene.get("scene_end_time",   ""),
+                    }
+
+        missing: list[str] = []
+        for clip in clips:
+            # Support both new schema (start_scene_id / end_scene_id) and legacy (scene_id).
+            start_sid = clip.get("start_scene_id") or clip.get("scene_id", "")
+            end_sid   = clip.get("end_scene_id")   or start_sid
+
+            start_info = scene_index.get(start_sid)
+            end_info   = scene_index.get(end_sid)
+
+            if start_info:
+                clip["episode_id"]      = start_info["episode_id"]
+                clip["clip_start_time"] = start_info["clip_start_time"]
+                if not start_info["clip_start_time"]:
+                    missing.append(start_sid)
+            else:
+                clip["episode_id"]      = _episode_from_scene_id(start_sid)
+                clip["clip_start_time"] = ""
+                missing.append(start_sid)
+
+            if end_info:
+                clip["clip_end_time"] = end_info["clip_end_time"]
+                if not end_info["clip_end_time"] and end_sid not in missing:
+                    missing.append(end_sid)
+            else:
+                clip["clip_end_time"] = ""
+                if end_sid not in missing:
+                    missing.append(end_sid)
+
+        if missing:
+            logger.warning(
+                "RhythmAnalyzer: %d marketing clip(s) missing timecodes: %s — "
+                "clear drama_map cache and re-run Stage 5 to populate timecodes",
+                len(missing), missing,
+            )

@@ -83,6 +83,8 @@ def _scene(scene_id: str, **kwargs) -> dict:
         "scene_id": scene_id,
         "location": kwargs.get("location", "office"),
         "time": kwargs.get("time", "morning"),
+        "scene_start_time": kwargs.get("scene_start_time", "00:01:00,000"),
+        "scene_end_time":   kwargs.get("scene_end_time",   "00:03:00,000"),
         "scene_actions": kwargs.get("scene_actions", ["A does something"]),
         "unresolved_debt": kwargs.get("unresolved_debt", "secret remains"),
         "pivot_signals": kwargs.get("pivot_signals", []),
@@ -527,6 +529,235 @@ class TestRunIntegration(unittest.TestCase):
             analyzer = _make_analyzer(tmp, llm_client=mock_llm)
             with self.assertRaises(RuntimeError):
                 analyzer.run(["ep01", "ep02"])
+
+
+# ===========================================================================
+# Test: _cache_has_timecodes — cache staleness detection
+# ===========================================================================
+
+class TestCacheHasTimecodes(unittest.TestCase):
+
+    def test_scene_with_timecodes_returns_true(self):
+        from src.intelligence.rhythm_analyzer import _cache_has_timecodes
+        cached = {"scenes": [_scene("ep01_sc_01")]}
+        self.assertTrue(_cache_has_timecodes(cached))
+
+    def test_scene_without_timecodes_returns_false(self):
+        from src.intelligence.rhythm_analyzer import _cache_has_timecodes
+        cached = {
+            "scenes": [{
+                "scene_id": "ep01_sc_01",
+                "location": "office",
+                "scene_actions": [],
+            }]
+        }
+        self.assertFalse(_cache_has_timecodes(cached))
+
+    def test_empty_scenes_returns_false(self):
+        from src.intelligence.rhythm_analyzer import _cache_has_timecodes
+        self.assertFalse(_cache_has_timecodes({"scenes": []}))
+
+    def test_no_scenes_key_returns_false(self):
+        from src.intelligence.rhythm_analyzer import _cache_has_timecodes
+        self.assertFalse(_cache_has_timecodes({}))
+
+    def test_stale_cache_triggers_reanalysis(self):
+        """Cache without timecodes should NOT be returned; LLM should be called."""
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            stale = {
+                "episode_id": "ep01",
+                "scenes": [{"scene_id": "ep01_sc_01", "location": "office",
+                             "scene_actions": [], "unresolved_debt": None,
+                             "pivot_signals": [], "structured_dialogues": []}],
+            }
+            cache_path = tmp / "cache" / "drama_map" / "ep01_conflict.json"
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(stale), encoding="utf-8")
+
+            srt_dir = tmp / "output" / "cn"
+            srt_dir.mkdir(parents=True)
+            (srt_dir / "ep01.srt").write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8"
+            )
+
+            mock_llm = MagicMock()
+            fresh = _ep_result("ep01")
+            mock_llm.complete.return_value = json.dumps(fresh)
+            analyzer = _make_analyzer(tmp, llm_client=mock_llm)
+            analyzer._analyze_one_episode("ep01")
+            mock_llm.complete.assert_called_once()
+
+
+# ===========================================================================
+# Test: _enrich_clips_with_timecodes — timecode injection into marketing_clips
+# ===========================================================================
+
+class TestEnrichClipsWithTimecodes(unittest.TestCase):
+
+    def _make_conflict_map(self):
+        return {
+            "ep01": {
+                "episode_id": "01",
+                "scenes": [
+                    {**_scene("ep01_sc_01",
+                               scene_start_time="00:01:10,000",
+                               scene_end_time="00:03:45,500")},
+                    {**_scene("ep01_sc_02",
+                               scene_start_time="00:03:50,000",
+                               scene_end_time="00:06:20,000")},
+                ],
+            },
+            "ep04": {
+                "episode_id": "04",
+                "scenes": [
+                    {**_scene("ep04_sc_02",
+                               scene_start_time="00:08:00,000",
+                               scene_end_time="00:10:30,000")},
+                ],
+            },
+        }
+
+    def test_timecodes_injected_from_scene_index(self):
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            analyzer = _make_analyzer(tmp)
+            blueprint = {
+                "marketing_clips": [
+                    {"scene_id": "ep01_sc_01", "mix_strategy": "cold_open",
+                     "action_start_focus": "start", "action_end_focus": "end",
+                     "contrast_rationale": "contrast"},
+                ]
+            }
+            analyzer._enrich_clips_with_timecodes(blueprint, self._make_conflict_map())
+            clip = blueprint["marketing_clips"][0]
+            self.assertEqual(clip["episode_id"],      "01")
+            self.assertEqual(clip["clip_start_time"], "00:01:10,000")
+            self.assertEqual(clip["clip_end_time"],   "00:03:45,500")
+
+    def test_multiple_clips_from_different_episodes(self):
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            analyzer = _make_analyzer(tmp)
+            blueprint = {
+                "marketing_clips": [
+                    {"scene_id": "ep01_sc_02", "mix_strategy": "single_scene",
+                     "action_start_focus": "s", "action_end_focus": "e",
+                     "contrast_rationale": "c"},
+                    {"scene_id": "ep04_sc_02", "mix_strategy": "confrontation_cut",
+                     "action_start_focus": "s", "action_end_focus": "e",
+                     "contrast_rationale": "c"},
+                ]
+            }
+            analyzer._enrich_clips_with_timecodes(blueprint, self._make_conflict_map())
+            clips = blueprint["marketing_clips"]
+            self.assertEqual(clips[0]["clip_start_time"], "00:03:50,000")
+            self.assertEqual(clips[1]["clip_start_time"], "00:08:00,000")
+            self.assertEqual(clips[1]["episode_id"],      "04")
+
+    def test_unknown_scene_id_gets_empty_timecodes(self):
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            analyzer = _make_analyzer(tmp)
+            blueprint = {
+                "marketing_clips": [
+                    {"scene_id": "ep99_sc_01", "mix_strategy": "montage",
+                     "action_start_focus": "s", "action_end_focus": "e",
+                     "contrast_rationale": "c"},
+                ]
+            }
+            analyzer._enrich_clips_with_timecodes(blueprint, self._make_conflict_map())
+            clip = blueprint["marketing_clips"][0]
+            self.assertEqual(clip["clip_start_time"], "")
+            self.assertEqual(clip["clip_end_time"],   "")
+            self.assertEqual(clip["episode_id"],      "99")
+
+    def test_no_clips_is_noop(self):
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            analyzer = _make_analyzer(tmp)
+            blueprint = {"marketing_clips": []}
+            analyzer._enrich_clips_with_timecodes(blueprint, self._make_conflict_map())
+            self.assertEqual(blueprint["marketing_clips"], [])
+
+    def test_missing_marketing_clips_key_is_noop(self):
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            analyzer = _make_analyzer(tmp)
+            blueprint = {"debt_chain_narrative": "something"}
+            analyzer._enrich_clips_with_timecodes(blueprint, {})
+            self.assertNotIn("marketing_clips", blueprint)
+
+    def test_start_end_scene_id_spans_two_scenes(self):
+        """start_scene_id drives clip_start_time; end_scene_id drives clip_end_time."""
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            analyzer = _make_analyzer(tmp)
+            blueprint = {
+                "marketing_clips": [
+                    {"start_scene_id": "ep01_sc_01", "end_scene_id": "ep01_sc_02",
+                     "mix_strategy": "confrontation_cut",
+                     "action_start_focus": "start", "action_end_focus": "end",
+                     "contrast_rationale": "contrast"},
+                ]
+            }
+            analyzer._enrich_clips_with_timecodes(blueprint, self._make_conflict_map())
+            clip = blueprint["marketing_clips"][0]
+            self.assertEqual(clip["episode_id"],      "01")
+            self.assertEqual(clip["clip_start_time"], "00:01:10,000")
+            self.assertEqual(clip["clip_end_time"],   "00:06:20,000")
+
+    def test_start_scene_id_without_end_defaults_to_same_scene(self):
+        """When end_scene_id is absent, behaves like a single-scene clip."""
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            analyzer = _make_analyzer(tmp)
+            blueprint = {
+                "marketing_clips": [
+                    {"start_scene_id": "ep01_sc_02",
+                     "mix_strategy": "single_scene",
+                     "action_start_focus": "s", "action_end_focus": "e",
+                     "contrast_rationale": "c"},
+                ]
+            }
+            analyzer._enrich_clips_with_timecodes(blueprint, self._make_conflict_map())
+            clip = blueprint["marketing_clips"][0]
+            self.assertEqual(clip["clip_start_time"], "00:03:50,000")
+            self.assertEqual(clip["clip_end_time"],   "00:06:20,000")
+
+    def test_unknown_end_scene_id_gives_empty_end_time(self):
+        """Known start_scene_id + unknown end_scene_id → valid start, empty end."""
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            analyzer = _make_analyzer(tmp)
+            blueprint = {
+                "marketing_clips": [
+                    {"start_scene_id": "ep01_sc_01", "end_scene_id": "ep01_sc_99",
+                     "mix_strategy": "cold_open",
+                     "action_start_focus": "s", "action_end_focus": "e",
+                     "contrast_rationale": "c"},
+                ]
+            }
+            analyzer._enrich_clips_with_timecodes(blueprint, self._make_conflict_map())
+            clip = blueprint["marketing_clips"][0]
+            self.assertEqual(clip["clip_start_time"], "00:01:10,000")
+            self.assertEqual(clip["clip_end_time"],   "")
+
+
+# ===========================================================================
+# Test: run() partial failure — orphaned method restored to TestRunIntegration
+# ===========================================================================
+
+class TestRunIntegrationPartial(unittest.TestCase):
+
+    def _setup_srt(self, output_dir: Path, ep_ids: list[str]) -> None:
+        srt_dir = output_dir / "cn"
+        srt_dir.mkdir(parents=True, exist_ok=True)
+        for ep_id in ep_ids:
+            (srt_dir / f"{ep_id}.srt").write_text(
+                f"1\n00:00:01,000 --> 00:00:02,000\nContent for {ep_id}\n",
+                encoding="utf-8",
+            )
 
     def test_run_partial_failure_uses_successful_episodes(self):
         with TemporaryDirectory() as td:
