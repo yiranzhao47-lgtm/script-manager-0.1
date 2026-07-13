@@ -7,7 +7,7 @@ pipeline:
   mode: "same_lang"         # "same_lang" | "cross_lang"
                             # same_lang  : audio language == subtitle language (ASR master)
                             # cross_lang : Chinese audio + foreign subtitles (OCR master)
-  source_language: "en"     # "zh" (default) | "en" | other ISO-639-1 code
+  source_language: "zh"     # "zh" (default) | "en" | other ISO-639-1 code
                             # Drives ASR language, output subdir name, prompt selection,
                             # and auto-disables translation when source is already English.
 
@@ -17,7 +17,7 @@ same_lang:
     model: "large-v3"       # stable-whisper model name
     device: "cuda"          # "cuda" | "cpu"
     compute_type: "float16" # faster-whisper precision: "float16" | "int8" | "float32"
-    language: "en"          # Whisper language code — "zh" for Chinese, "en" for English
+    language: "zh"          # Whisper language code — "zh" for Chinese, "en" for English
     watermark_patterns: []  # platform intro/outro phrases to suppress
     hallucination:
       max_segment_duration_sec: 8.0   # segments longer than this are dropped (Whisper fills silence with hallucinations; real dialogue rarely exceeds 4-5 s)
@@ -26,7 +26,7 @@ same_lang:
   ocr:
     fps: 2                  # frames per second sampled for OCR
     roi: [0.78, 0.94]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
-    language: "en"          # PaddleOCR language code — "ch" for Chinese, "en" for English
+    language: "ch"          # PaddleOCR language code — "ch" for Chinese, "en" for English
     use_gpu: true
     min_line_confidence: 0.50   # discard OCR text boxes with confidence below this value
   alignment:

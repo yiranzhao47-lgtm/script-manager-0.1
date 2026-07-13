@@ -52,7 +52,7 @@ def _clip_filename(clip_id: int, clip_title: str) -> str:
 def _truncate(text: str, limit: int) -> str:
     text = text.strip()
     if len(text) > limit:
-        logger.warning("  Field truncated from %d → %d chars: %r…", len(text), limit, text[:30])
+        logger.warning("  Field truncated from %d to %d chars: %r", len(text), limit, text[:30])
         return text[:limit].rstrip()
     return text
 
@@ -209,7 +209,7 @@ def main(drama_name: str) -> int:
         writer.writeheader()
         writer.writerows(rows)
 
-    logger.info("ad_copy.csv written → %s  (%d rows)", csv_path, len(rows))
+    logger.info("ad_copy.csv written: %s  (%d rows)", csv_path, len(rows))
     if missing_ids:
         logger.warning("Missing copy for clip_id(s): %s", missing_ids)
 

@@ -189,7 +189,7 @@ def main(drama_name: str, filter_ids: set[int] | None) -> int:
     if errors:
         print("Failures:")
         for e in errors:
-            print(f"  • {e}")
+            print(f"  - {e}")
     return 0 if not errors else 1
 
 

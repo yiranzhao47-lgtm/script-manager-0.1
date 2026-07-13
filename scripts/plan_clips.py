@@ -59,7 +59,7 @@ def _build_scene_inventory(episode_conflicts: dict) -> str:
             pivots  = scene.get("pivot_signals", [])
             lines.append(f"[{sid}] {start}→{end} ({dur:.0f}s)")
             for act in actions[:3]:
-                lines.append(f"  • {act}")
+                lines.append(f"  - {act}")
             for pv in pivots[:2]:
                 lines.append(f"  PIVOT: {pv}")
         lines.append("")
@@ -392,7 +392,7 @@ def main(drama_name: str) -> int:
     if warnings:
         logger.warning("Validation warnings (%d):", len(warnings))
         for w in warnings:
-            logger.warning("  • %s", w)
+            logger.warning("  - %s", w)
 
     # Auto-extend plans that are below the 165-second target
     n_extended = _extend_short_plans(plans, episode_conflicts, target_sec=165)

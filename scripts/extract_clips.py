@@ -60,6 +60,7 @@ def main(drama_name: str) -> int:
     print(f"Output: {out_dir}")
     print()
 
+    skipped: list[str] = []
     errors: list[str] = []
     for i, clip in enumerate(clips, 1):
         ep_id    = clip.get("episode_id", "")
@@ -68,16 +69,24 @@ def main(drama_name: str) -> int:
         strategy = clip.get("mix_strategy", "clip")
 
         if not ep_id or not start or not end:
-            msg = f"clip {i:02d}: missing episode_id or timecodes — skipped"
+            msg = f"clip {i:02d}: missing timecodes — skipped (re-run Stage 5 to fix)"
             print(f"[{i:02d}] SKIP  {msg}")
-            errors.append(msg)
+            skipped.append(msg)
+            continue
+
+        start_sec = sum(float(x) * m for x, m in zip(start.replace(",", ".").split(":"), [3600, 60, 1]))
+        end_sec   = sum(float(x) * m for x, m in zip(end.replace(",", ".").split(":"), [3600, 60, 1]))
+        if end_sec <= start_sec:
+            msg = f"clip {i:02d}: end ({end}) <= start ({start}) — reversed timecodes, skipped"
+            print(f"[{i:02d}] SKIP  {msg}")
+            skipped.append(msg)
             continue
 
         video = _find_video(raw_dir, ep_id)
         if video is None:
             msg = f"clip {i:02d}: video not found for ep {ep_id} in {raw_dir}"
             print(f"[{i:02d}] SKIP  {msg}")
-            errors.append(msg)
+            skipped.append(msg)
             continue
 
         out_name = f"clip_{i:02d}_ep{ep_id}_{strategy}.mp4"
@@ -95,7 +104,7 @@ def main(drama_name: str) -> int:
             str(out_path),
         ]
 
-        print(f"[{i:02d}] ep{ep_id}  {start} → {end}  ({strategy})")
+        print(f"[{i:02d}] ep{ep_id}  {start} - {end}  ({strategy})")
         result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             tail = result.stderr.strip().splitlines()
@@ -103,15 +112,19 @@ def main(drama_name: str) -> int:
             errors.append(f"clip {i:02d}: ffmpeg exit {result.returncode}")
         else:
             size_kb = out_path.stat().st_size // 1024
-            print(f"       → {out_name}  ({size_kb} KB)")
+            print(f"       done: {out_name}  ({size_kb} KB)")
 
     print()
-    ok = len(clips) - len(errors)
+    ok = len(clips) - len(skipped) - len(errors)
     print(f"Done: {ok}/{len(clips)} clips extracted to {out_dir}")
+    if skipped:
+        print(f"Skipped ({len(skipped)}):")
+        for s in skipped:
+            print(f"  - {s}")
     if errors:
-        print("Failures:")
+        print(f"Failures ({len(errors)}):")
         for e in errors:
-            print(f"  • {e}")
+            print(f"  - {e}")
     return 0 if not errors else 1
 
 
