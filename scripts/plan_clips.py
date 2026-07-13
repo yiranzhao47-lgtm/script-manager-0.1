@@ -94,12 +94,13 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
     """
     Extend plan in-place by appending scenes until total video duration ≥ target_sec.
 
-    Tracks actual VIDEO time (segment spans including inter-scene gaps).
-    A scene is added even when it pushes total past target — the clip is not cut
-    in the middle of a scene.  Only the hard ceiling (target + 35s) stops a scene
-    from being included.  After reaching target, the next available pivot scene
-    is used as the cliffhanger.
+    Three guards applied during extension:
+      • Protagonist unity (Fix 3): stop at episode boundaries where protagonist is absent.
+      • No-spoiler cliffhanger (Fix 2): stop before a scene that answers previously open tension
+        (pattern: prev scene had unresolved_debt → this scene has pivot_signals + no debt).
+      • Hard ceiling: never exceed target_sec + 50s regardless of other checks.
     """
+    protagonist: str = plan.get("protagonist_name", "").strip()
     segments = plan.get("segments", [])
     if not segments:
         return
@@ -108,9 +109,8 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
     if committed_sec >= target_sec:
         return
 
-    max_sec = target_sec + 50  # hard ceiling: never include a scene that would pass this
+    max_sec = target_sec + 50
 
-    # Anchor: last scene_id in the last segment
     last_seg  = segments[-1]
     last_sids = last_seg.get("scene_ids", [])
     last_sid  = last_sids[-1] if last_sids else ""
@@ -142,36 +142,9 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
             return max(0.0, _ts_to_sec(pending_end) - _ts_to_sec(pending_start))
         return 0.0
 
-    following = ordered_scenes[start_pos + 1:]
-    target_reached = False
-
-    for i, sc in enumerate(following):
-        ep_id    = sc["episode_id"]
-        sc_start = sc.get("scene_start_time", "")
-        sc_end   = sc.get("scene_end_time", "")
-        sc_id    = sc.get("scene_id", "")
-
-        # If target already reached, scan for the first cliffhanger pivot
-        if target_reached:
-            if sc.get("pivot_signals"):
-                cliffhanger = sc_id
-            break
-
-        # Compute total video time if we include this scene
-        if ep_id == pending_ep:
-            new_span     = max(0.0, _ts_to_sec(sc_end) - _ts_to_sec(pending_start))
-            total_if_add = committed_sec + new_span
-        else:
-            sc_span      = max(0.0, _ts_to_sec(sc_end) - _ts_to_sec(sc_start))
-            total_if_add = committed_sec + _pending_span() + sc_span
-
-        # Hard ceiling: skip this scene and stop
-        if total_if_add > max_sec:
-            cliffhanger = sc_id
-            break
-
-        # Flush pending when switching episodes
-        if pending_ep is not None and ep_id != pending_ep:
+    def _flush_pending() -> None:
+        nonlocal committed_sec, pending_ep, pending_start, pending_end, pending_ids
+        if pending_ep is not None:
             committed_sec += _pending_span()
             segments.append({
                 "episode_id": pending_ep,
@@ -183,6 +156,61 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
             pending_ep = pending_start = pending_end = None
             pending_ids = []
 
+    following = ordered_scenes[start_pos + 1:]
+    target_reached = False
+    prev_had_debt  = True  # assume initial content leaves tension open
+
+    for sc in following:
+        ep_id      = sc["episode_id"]
+        sc_start   = sc.get("scene_start_time", "")
+        sc_end     = sc.get("scene_end_time", "")
+        sc_id      = sc.get("scene_id", "")
+        sc_pivot   = sc.get("pivot_signals", [])
+        sc_debt    = sc.get("unresolved_debt")      # None = tension resolved
+        sc_actions = " ".join(sc.get("scene_actions", []))
+
+        # ── If target already reached, scan for cliffhanger pivot ──────────
+        if target_reached:
+            if sc_pivot:
+                cliffhanger = sc_id
+            break
+
+        # ── Fix 2: no-spoiler guard ─────────────────────────────────────────
+        # Stop before a scene that ANSWERS the previously open tension.
+        # Pattern: previous scene left debt open + this scene has pivot signals
+        # and resolves its own debt → it is the "answer" scene.
+        # Only apply after meaningful content (≥ 90s) so we don't stop too early.
+        if (prev_had_debt and sc_pivot and sc_debt is None
+                and committed_sec + _pending_span() >= 90):
+            _flush_pending()
+            cliffhanger = sc_id
+            break
+
+        # ── Fix 3: protagonist unity guard ─────────────────────────────────
+        # At episode boundaries, stop if protagonist is absent in the new episode.
+        if protagonist and ep_id != pending_ep and pending_ep is not None:
+            if protagonist.lower() not in sc_actions.lower():
+                _flush_pending()
+                cliffhanger = sc_id
+                break
+
+        # ── Duration computation ────────────────────────────────────────────
+        if ep_id == pending_ep:
+            new_span     = max(0.0, _ts_to_sec(sc_end) - _ts_to_sec(pending_start))
+            total_if_add = committed_sec + new_span
+        else:
+            sc_span      = max(0.0, _ts_to_sec(sc_end) - _ts_to_sec(sc_start))
+            total_if_add = committed_sec + _pending_span() + sc_span
+
+        # Hard ceiling
+        if total_if_add > max_sec:
+            cliffhanger = sc_id
+            break
+
+        # Flush pending when switching episodes (after protagonist check above)
+        if pending_ep is not None and ep_id != pending_ep:
+            _flush_pending()
+
         # Add scene to pending
         if pending_ep is None:
             pending_ep    = ep_id
@@ -190,21 +218,14 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
         pending_end = sc_end
         pending_ids.append(sc_id)
 
-        # Check if target is now reached after adding this scene
         current_total = committed_sec + _pending_span()
         if current_total >= target_sec:
-            target_reached = True  # next iteration scans for cliffhanger
+            target_reached = True
 
-    # Flush remaining pending
-    if pending_ep is not None:
-        committed_sec += _pending_span()
-        segments.append({
-            "episode_id": pending_ep,
-            "start_time": pending_start,
-            "end_time":   pending_end,
-            "scene_ids":  pending_ids,
-            "note":       "[auto-extended]",
-        })
+        prev_had_debt = (sc_debt is not None)
+
+    # Flush any remaining pending scenes
+    _flush_pending()
 
     if cliffhanger:
         plan["cliffhanger_scene_id"] = cliffhanger
@@ -241,13 +262,14 @@ def _build_clips_text(marketing_clips: list) -> str:
     """Compact text describing the marketing clip starting points."""
     lines: list[str] = []
     for i, clip in enumerate(marketing_clips, 1):
-        ep      = clip.get("episode_id", "?")
-        start   = clip.get("clip_start_time", "?")
-        end     = clip.get("clip_end_time", "?")
+        ep       = clip.get("episode_id", "?")
+        # clip_start_time is already hook_start_time (set by rhythm_analyzer enrichment)
+        hook     = clip.get("clip_start_time", "?")
+        end      = clip.get("clip_end_time", "?")
         strategy = clip.get("mix_strategy", "?")
         a_start  = clip.get("action_start_focus", "")
         a_end    = clip.get("action_end_focus", "")
-        lines.append(f"CLIP {i}: episode_id={ep}  start_time={start}  end_time={end}  [{strategy}]")
+        lines.append(f"CLIP {i}: episode_id={ep}  hook_start_time={hook}  end_time={end}  [{strategy}]")
         lines.append(f"  Opening action : {a_start}")
         lines.append(f"  Closing action : {a_end}")
         lines.append("")
@@ -257,12 +279,16 @@ def _build_clips_text(marketing_clips: list) -> str:
 def _validate_plans(plans: dict, episode_conflicts: dict) -> list[str]:
     """Lightweight validation — return list of warning strings."""
     warnings: list[str] = []
-    # Build scene timecode index for quick lookup
+    # Build scene timecode index for quick lookup.
+    # hook_start_time is a sub-scene timestamp (may differ from scene_start_time)
+    # and is pre-approved for use as the first segment's start — include it here.
     valid_times: set[str] = set()
     for ep in episode_conflicts.values():
         for sc in ep.get("scenes", []):
             valid_times.add(sc.get("scene_start_time", ""))
             valid_times.add(sc.get("scene_end_time", ""))
+            if sc.get("hook_start_time"):
+                valid_times.add(sc["hook_start_time"])
 
     for plan in plans.get("clip_plans", []):
         cid = plan.get("clip_id", "?")

@@ -58,9 +58,13 @@ def _episode_from_scene_id(scene_id: str) -> str:
 
 
 def _cache_has_timecodes(cached: dict) -> bool:
-    """Return True only if the cached map result already has scene-level timecodes."""
+    """Return True only if the cached map result has scene timecodes AND hook_start_time."""
     scenes = cached.get("scenes", [])
-    return bool(scenes) and "scene_start_time" in scenes[0]
+    return (
+        bool(scenes)
+        and "scene_start_time" in scenes[0]
+        and "hook_start_time" in scenes[0]
+    )
 
 
 def _build_jinja_env():
@@ -346,7 +350,58 @@ class RhythmAnalyzer:
                 "paywall report and clip recommendations may be incomplete.",
                 missing,
             )
+
+        # Clip zone distribution validation (target: 4 / 3 / 3)
+        self._validate_clip_distribution(blueprint)
+
         return blueprint
+
+    def _validate_clip_distribution(self, blueprint: dict) -> None:
+        """
+        Verify marketing_clips follow the 4/3/3 zone target and log diagnostics.
+
+        Does not retry — just surfaces the actual counts so operators can judge
+        whether a re-run is warranted.  Fallback cases (zone_1 shallow) are
+        expected and noted via clip_distribution_note from the LLM.
+        """
+        clips = blueprint.get("marketing_clips", [])
+        if not clips:
+            return
+
+        zone_counts: dict[str, int] = {
+            "pre_first_pinch":   0,
+            "mid":               0,
+            "post_second_pinch": 0,
+            "unknown":           0,
+        }
+        for clip in clips:
+            zone = clip.get("clip_zone", "")
+            if zone in zone_counts:
+                zone_counts[zone] += 1
+            else:
+                zone_counts["unknown"] += 1
+
+        note = blueprint.get("clip_distribution_note", "")
+        z1, z2, z3 = (
+            zone_counts["pre_first_pinch"],
+            zone_counts["mid"],
+            zone_counts["post_second_pinch"],
+        )
+        total = len(clips)
+
+        if z1 == 4 and z2 == 3 and z3 == 3:
+            logger.info(
+                "RhythmAnalyzer: clip distribution OK — "
+                "pre_first_pinch=%d  mid=%d  post_second_pinch=%d  total=%d",
+                z1, z2, z3, total,
+            )
+        else:
+            logger.warning(
+                "RhythmAnalyzer: clip distribution off-target (expected 4/3/3) — "
+                "pre_first_pinch=%d  mid=%d  post_second_pinch=%d  unknown=%d  total=%d%s",
+                z1, z2, z3, zone_counts["unknown"], total,
+                f"  LLM note: {note}" if note else "",
+            )
 
     def _build_conflict_chain(self, conflict_map: dict[str, dict]) -> str:
         """
@@ -455,10 +510,13 @@ class RhythmAnalyzer:
             for scene in ep_data.get("scenes", []):
                 sid = scene.get("scene_id", "")
                 if sid:
+                    # Prefer hook_start_time (first conflict line) over scene_start_time
+                    # so assembled clips open on the tension peak, not the scene boundary.
+                    hook = scene.get("hook_start_time") or scene.get("scene_start_time", "")
                     scene_index[sid] = {
                         "episode_id":      ep_id,
-                        "clip_start_time": scene.get("scene_start_time", ""),
-                        "clip_end_time":   scene.get("scene_end_time",   ""),
+                        "clip_start_time": hook,
+                        "clip_end_time":   scene.get("scene_end_time", ""),
                     }
 
         missing: list[str] = []

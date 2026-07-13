@@ -8,9 +8,12 @@ for social media infeed advertising.
 DESIGN RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. FIRST SEGMENT: the very first segment of each clip MUST match exactly the
-   episode_id, start_time, and end_time listed under MARKETING CLIP STARTING
-   POINTS for that clip. Do not change these.
+1. HOOK OPENING — first segment must start at hook_start_time:
+   Each clip in MARKETING CLIP STARTING POINTS has a hook_start_time — the
+   timecode of the first high-tension dialogue line in the opening scene.
+   The first segment's start_time MUST be this hook_start_time verbatim.
+   This value is pre-approved and does NOT need to appear in the scene inventory.
+   All subsequent segment timecodes MUST appear verbatim in the scene inventory.
 
 2. ONE SEGMENT = ONE EPISODE FILE: each segment must be entirely within one
    episode. To include scenes from a different episode, start a new segment.
@@ -23,20 +26,39 @@ DESIGN RULES
 4. CHRONOLOGICAL ORDER: segments must follow story order. Never go backward
    in episode number. Within an episode, never go backward in time.
 
-5. SCENE SELECTION: choose scenes that show direct plot consequences of the
-   opening conflict. Prefer scenes with unresolved_debt or actions that raise
-   new questions. Skip scenes that merely repeat established information.
+5. PROTAGONIST UNITY — single POV, single story line:
+   Before planning segments, identify the protagonist of this clip: the one
+   character whose desire, decision, or dilemma the opening conflict belongs to.
+   Record as protagonist_name.
+   Every segment you select MUST contain scenes where that character is an
+   active participant. Do NOT include scenes where the protagonist is absent,
+   even if those scenes are causally related to the conflict.
+   This ensures the clip has one continuous viewpoint — no mid-clip POV jumps.
 
-6. TOTAL DURATION TARGET: 160–200 seconds per clip.
+6. SCENE SELECTION: within the protagonist's story line, choose scenes that
+   show direct causal consequences of the opening conflict. Prefer scenes with
+   unresolved_debt or pivot_signals that raise new questions. Skip scenes that
+   merely repeat established information or feature other characters' subplots.
+
+7. TOTAL DURATION TARGET: 160–200 seconds per clip.
    Calculate duration as sum of (end_time − start_time) for each segment.
 
-7. CLIFFHANGER ENDING: the final segment must stop JUST BEFORE a scene that
-   has PIVOT signals listed. That unseen pivot scene is the viewer's hook.
-   Record its scene_id in cliffhanger_scene_id.
+8. CLIFFHANGER — NO SPOILER:
+   The clip must end at the MOMENT OF MAXIMUM UNRESOLVED TENSION — the instant
+   before the audience learns the answer to the central question raised by the clip.
+   Concretely:
+     • The final scene included MUST have a non-null unresolved_debt — the tension
+       is still explicitly open at the cut point.
+     • Do NOT include any scene where the protagonist makes the key decision,
+       accepts/rejects the central demand, or reacts to the revelation.
+       That reaction scene is the spoiler — it becomes the cliffhanger_scene_id.
+     • The viewer exits asking "what will she/he do?" — never "oh, I see what happens."
+   Record the FIRST SCENE THAT WOULD ANSWER the cliffhanger question as
+   cliffhanger_scene_id. It must not appear in any segment.
 
-8. EXACT TIMECODES ONLY: every start_time and end_time you write MUST appear
-   verbatim as a scene_start_time or scene_end_time in the SCENE INVENTORY
-   below. Do not round, estimate, or invent timestamps.
+9. EXACT TIMECODES: every start_time and end_time you write for segments 2+
+   MUST appear verbatim as a scene_start_time or scene_end_time in the SCENE
+   INVENTORY below. Do not round, estimate, or invent timestamps.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MARKETING CLIP STARTING POINTS
@@ -55,18 +77,19 @@ REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown fences)
     {
       "clip_id": 1,
       "clip_title": "<10-word max title describing the opening conflict hook>",
+      "protagonist_name": "<name of the single character whose POV drives this clip>",
       "segments": [
         {
           "episode_id": "<two-digit string e.g. '01'>",
-          "start_time": "<HH:MM:SS,mmm — verbatim from scene inventory>",
+          "start_time": "<HH:MM:SS,mmm — hook_start_time for segment 1; scene timecode for all others>",
           "end_time":   "<HH:MM:SS,mmm — verbatim from scene inventory>",
           "scene_ids":  ["<first scene_id in this segment>", "<last scene_id if combined>"],
-          "note": "<one sentence: what this segment shows>"
+          "note": "<one sentence: what this segment shows and why it follows the protagonist>"
         }
       ],
       "estimated_total_sec": 180,
-      "cliffhanger_scene_id": "<scene_id of the unseen pivot scene that ends the hook>",
-      "cliffhanger_reason": "<one sentence: why stopping here maximises viewer curiosity>"
+      "cliffhanger_scene_id": "<scene_id of the first scene that ANSWERS the cliffhanger question — NOT included in any segment>",
+      "cliffhanger_reason": "<one sentence: what question the viewer is left asking>"
     }
   ]
 }

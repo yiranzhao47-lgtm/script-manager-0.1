@@ -53,6 +53,14 @@ EXTRACTION RULES
    KNOWN CHARACTERS list above.  Assign "UNKNOWN" only when you truly cannot
    infer the speaker.  Omit trivial filler lines.
 
+8. hook_start_time: scan the SRT content for the FIRST subtitle line in this
+   scene where conflict becomes explicit — a direct threat, accusation, demand,
+   refusal, or revelation that puts a character under pressure.
+   Copy that line's START timestamp verbatim (HH:MM:SS,mmm format).
+   If the very first subtitle line of the scene is already confrontational,
+   hook_start_time equals scene_start_time.
+   Do NOT pick establishing shots, greetings, or scene-setting narration.
+
 ABSOLUTE PROHIBITION:
   ✗ No percentages, numeric scores, or intensity ratings of any kind
   ✗ No phrases like "crisis saturation", "tension level", "dramatic weight"
@@ -72,6 +80,7 @@ REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown)
       "time": "<time of day or temporal marker, e.g. 'morning', 'that night', 'three days later'>",
       "scene_start_time": "<HH:MM:SS,mmm — start timestamp of first subtitle in this scene>",
       "scene_end_time": "<HH:MM:SS,mmm — end timestamp of last subtitle in this scene>",
+      "hook_start_time": "<HH:MM:SS,mmm — timestamp of first conflict-carrying line; equals scene_start_time if scene opens directly on conflict>",
       "scene_actions": [
         "<action or decision — factual, causal>",
         "..."

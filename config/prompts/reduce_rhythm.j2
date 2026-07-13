@@ -52,12 +52,32 @@ After the first pinch, classify the story's energy pattern:
             deepening doom; audience hook is dread and dramatic irony.
 
 MARKETING CLIP RECOMMENDATIONS
-Recommend 8–10 clips drawn from specific scenes in the conflict chain.
-Cover a variety of clip strategies: include at least 2 cold_open, 2 confrontation_cut,
-1 montage, and 1 single_scene entry.  Spread clips across early (ep01–20),
-mid (ep21–50), and late (ep51–end) episodes so the paywall report can select
-platform-appropriate material for different funnel stages.
+Recommend exactly 10 clips drawn from specific scenes in the conflict chain.
+Distribute them across three structural zones defined by the pinch points you identified above:
+
+  Zone 1 — pre_first_pinch  (ep01 up to but NOT including first_pinch.target_scene_id)
+            Target: 4 clips.  These are the hook clips that make a viewer start watching.
+            Pick scenes that carry the highest unresolved_debt and clearest character desire.
+
+  Zone 2 — mid              (from first_pinch.target_scene_id up to but NOT including
+                              second_pinch.target_scene_id)
+            Target: 3 clips.  These cover the escalation arc between the two reversals.
+
+  Zone 3 — post_second_pinch (from second_pinch.target_scene_id to the final episode)
+            Target: 3 clips.  These tease the resolution without spoiling it.
+
+FALLBACK RULE (apply only when zone_1 is too shallow):
+  If Zone 1 contains fewer than 4 distinct scene_ids in the conflict chain, use every
+  available Zone 1 scene (may be 1–3 clips) and compensate by adding the shortfall to
+  Zone 2 so the total always reaches 10.  Zone 3 stays fixed at 3.
+  Record the actual zone counts in the clip_distribution_note field.
+
+Mix-strategy diversity requirement (across all 10 clips):
+  Include at least 2 cold_open, 2 confrontation_cut, 1 montage, and 1 single_scene.
+  Distribute strategy types across all three zones — do not cluster all cold_opens in Zone 1.
+
 Each clip must have:
+  • clip_zone:          "pre_first_pinch" | "mid" | "post_second_pinch"
   • start_scene_id:     the scene_id where the clip STARTS (from the conflict chain)
   • end_scene_id:       the scene_id where the clip ENDS — may equal start_scene_id for a
                         single-scene clip, or be the immediately following scene_id when the
@@ -122,8 +142,10 @@ REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown)
     "type": "A",
     "rationale": "<one or two sentences, causal and factual, explaining the classification>"
   },
+  "clip_distribution_note": "<leave empty string if 4/3/3 achieved; otherwise state actual zone counts and reason e.g. 'zone_1=2 (only 2 scenes available), zone_2=5, zone_3=3'>",
   "marketing_clips": [
     {
+      "clip_zone": "pre_first_pinch",
       "start_scene_id": "<scene_id where the clip starts>",
       "end_scene_id": "<scene_id where the clip ends — same as start_scene_id OR the next scene_id>",
       "mix_strategy": "cold_open",
