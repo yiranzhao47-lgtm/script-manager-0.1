@@ -194,8 +194,9 @@ class CostAuditor:
         self._output_dir.mkdir(parents=True, exist_ok=True)
         out_path = self._output_dir / filename
 
+        now = datetime.datetime.now().isoformat(timespec="seconds")
         payload = {
-            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "generated_at": now,
             "model": model,
             "pricing_used": config.get("pricing", {}).get(model, {}),
             "by_module": rows,
@@ -207,10 +208,37 @@ class CostAuditor:
             },
         }
 
+        # ── Guard: never overwrite real data with an empty run ────────────
+        if total["input_tokens"] == 0 and total["output_tokens"] == 0:
+            if out_path.exists():
+                try:
+                    existing = json.loads(out_path.read_text(encoding="utf-8"))
+                    if existing.get("total", {}).get("input_tokens", 0) > 0:
+                        logger.info(
+                            "CostAuditor: skipping %s — no new API calls this run, "
+                            "existing data preserved",
+                            filename,
+                        )
+                        self._append_history(payload, filename)
+                        return
+                except Exception:
+                    pass
+
         tmp = out_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(out_path)
-        logger.info("CostAuditor: cost_report.json written → %s", out_path)
+        logger.info("CostAuditor: %s written to %s", filename, out_path)
+        self._append_history(payload, filename)
+
+    def _append_history(self, payload: dict, source_filename: str) -> None:
+        """Append one cost record to cost_history.jsonl (never overwritten)."""
+        history_path = self._output_dir / "cost_history.jsonl"
+        record = {**payload, "source_file": source_filename}
+        try:
+            with history_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning("CostAuditor: could not append to cost_history.jsonl: %s", exc)
 
 
 # ── Module-level helper ───────────────────────────────────────────────────────
