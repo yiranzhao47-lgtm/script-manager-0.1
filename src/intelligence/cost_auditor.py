@@ -211,18 +211,21 @@ class CostAuditor:
         # ── Guard: never overwrite real data with an empty run ────────────
         if total["input_tokens"] == 0 and total["output_tokens"] == 0:
             if out_path.exists():
+                preserve = False
                 try:
                     existing = json.loads(out_path.read_text(encoding="utf-8"))
                     if existing.get("total", {}).get("input_tokens", 0) > 0:
-                        logger.info(
-                            "CostAuditor: skipping %s — no new API calls this run, "
-                            "existing data preserved",
-                            filename,
-                        )
-                        self._append_history(payload, filename)
-                        return
+                        preserve = True
                 except Exception:
-                    pass
+                    preserve = True  # parse failure → assume existing data is real
+                if preserve:
+                    logger.info(
+                        "CostAuditor: skipping %s — no new API calls this run, "
+                        "existing data preserved",
+                        filename,
+                    )
+                    self._append_history(payload, filename)
+                    return
 
         tmp = out_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

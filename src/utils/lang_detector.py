@@ -28,6 +28,17 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Cached faster-whisper tiny model — loaded once, reused across calls.
+_whisper_tiny: object = None
+
+
+def _get_whisper_tiny():
+    global _whisper_tiny
+    if _whisper_tiny is None:
+        from faster_whisper import WhisperModel
+        _whisper_tiny = WhisperModel("tiny", device="cpu", compute_type="int8")
+    return _whisper_tiny
+
 # ── CJK Unicode ranges used for script classification ────────────────────────
 _CJK_RANGES: tuple[tuple[int, int], ...] = (
     (0x4E00, 0x9FFF),  # CJK Unified Ideographs (core Han)
@@ -549,11 +560,10 @@ def detect_audio_language(video_path: Path) -> str:
     """
     Detect spoken language from the first 30 s of a video's audio track.
 
-    Uses faster-whisper 'tiny' model on CPU — loads in ~1 s, no GPU pressure.
+    Uses faster-whisper 'tiny' model on CPU (cached at module level).
     Returns "zh" (any Sinitic variant), "en", or "unknown" on failure.
     """
     try:
-        from faster_whisper import WhisperModel
         from faster_whisper.audio import decode_audio
     except ImportError:
         logger.warning("faster-whisper not available — audio language detection skipped")
@@ -563,7 +573,7 @@ def detect_audio_language(video_path: Path) -> str:
         audio = decode_audio(str(video_path), sampling_rate=16000)
         audio_30s = audio[: 30 * 16000]
 
-        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        model = _get_whisper_tiny()
         language, probability = model.detect_language(audio_30s)
         logger.info(
             "Audio language detected: %s (prob=%.2f)  file=%s",

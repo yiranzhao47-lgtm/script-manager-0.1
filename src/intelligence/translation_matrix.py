@@ -1179,11 +1179,11 @@ class TranslationMatrix:
                 item["note"] = f"established English first name from show: {en_aliases[0]} ★"
             characters.append(item)
 
+        drama_name = Path(self._meta_dir).name
         drama_context = (
-            "Title: Win the Love War (胜爱情战争). Genre: workplace romance / short drama. "
-            "Setting: modern corporate environment in China. "
-            "Main characters include a fashion director (林展虹), a physician (闻誉施), "
-            "a CEO (陆子谦, known on-screen as Ethan)."
+            f"Drama title/folder: {drama_name}. "
+            "Genre: Chinese short drama. "
+            "Setting: contemporary China."
         )
 
         tmpl = self._jinja.get_template("localize_char_names.j2")

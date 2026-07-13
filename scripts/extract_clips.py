@@ -27,10 +27,12 @@ def _srt_to_ffmpeg(ts: str) -> str:
 
 
 def _find_video(raw_dir: Path, ep_id: str) -> Path | None:
-    for candidate in (
-        raw_dir / f"{ep_id}.mp4",
-        raw_dir / f"{int(ep_id):02d}.mp4",
-    ):
+    candidates = [raw_dir / f"{ep_id}.mp4"]
+    try:
+        candidates.append(raw_dir / f"{int(ep_id):02d}.mp4")
+    except ValueError:
+        pass
+    for candidate in candidates:
         if candidate.exists():
             return candidate
     return None

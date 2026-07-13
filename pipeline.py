@@ -161,15 +161,26 @@ def _is_drama_complete(drama_name: str) -> bool:
         g = data.get("global", {})
         if not (g.get("map_done") and g.get("reduce_done")):
             return False
-        # Also verify no new video files were added since last run
+        # Verify no new video files were added since last run
         video_list = set(g.get("video_list", []))
         raw_dir = _ROOT / "data" / "raw" / drama_name
         current_videos = {
             v.name for v in raw_dir.iterdir()
             if v.suffix.lower() in _VIDEO_EXTS
         } if raw_dir.exists() else set()
-        return current_videos == video_list
-    except (json.JSONDecodeError, OSError):
+        if current_videos != video_list:
+            return False
+        # Verify every tracked episode has reached at least the 'refined' state
+        episodes: dict = data.get("episodes", {})
+        if not episodes:
+            return False
+        from src.utils.checkpoint import _STATE_RANK
+        refined_rank = _STATE_RANK.get("refined", 4)
+        for ep_id, state in episodes.items():
+            if _STATE_RANK.get(state, 0) < refined_rank:
+                return False
+        return True
+    except (json.JSONDecodeError, OSError, ImportError):
         return False
 
 
@@ -786,12 +797,19 @@ class ShortDramaPipeline:
                 logger.error("   [6/6] plan_clips failed (rc=%d) — skipping assemble", rc)
                 return
 
-        # Step 3: assemble ext_*.mp4 (skip if already assembled)
-        existing = list((self._output_dir / "creatives").glob("ext_*.mp4"))
-        if existing:
+        # Step 3: assemble ext_*.mp4 (skip only if the plan is fully assembled)
+        creatives_dir = self._output_dir / "creatives"
+        try:
+            import json as _json
+            _plans = _json.loads(plans_path.read_text(encoding="utf-8"))
+            _expected = len(_plans.get("clip_plans", []))
+        except Exception:
+            _expected = 0
+        existing = list(creatives_dir.glob("ext_*.mp4"))
+        if _expected > 0 and len(existing) >= _expected:
             logger.info(
-                "   [6/6] Step 3/3 — %d assembled clip(s) already exist, skipping",
-                len(existing),
+                "   [6/6] Step 3/3 — %d/%d assembled clip(s) already exist, skipping",
+                len(existing), _expected,
             )
         else:
             logger.info("   [6/6] Step 3/3 — assembling final marketing clips")
@@ -1233,11 +1251,14 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         logger.info("\nPipeline interrupted (Ctrl+C) — checkpoint preserved, re-run to resume")
+        _allow_sleep()
         sys.exit(0)
     except SystemExit:
+        _allow_sleep()
         raise
     except Exception:
         logger.exception("Unhandled exception — pipeline aborted")
-    finally:
         _allow_sleep()
         sys.exit(1)
+    else:
+        _allow_sleep()

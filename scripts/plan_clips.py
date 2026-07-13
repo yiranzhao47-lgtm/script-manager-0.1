@@ -404,8 +404,10 @@ def main(drama_name: str) -> int:
         if i < len(marketing_clips):
             plan["_source_clip"] = marketing_clips[i]
 
-    out_path.write_text(json.dumps(plans, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("Clip plans saved → %s", out_path)
+    tmp_path = out_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(plans, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(out_path)
+    logger.info("Clip plans saved -> %s", out_path)
 
     # Summary table (show actual computed duration, not LLM estimate)
     clip_list = plans.get("clip_plans", [])

@@ -78,7 +78,9 @@ def _concat(segment_paths: list[Path], out: Path) -> bool:
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
     ) as f:
         for p in segment_paths:
-            f.write(f"file '{p.as_posix()}'\n")
+            # ffmpeg concat protocol: escape single quotes inside the path
+            escaped = p.as_posix().replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
         list_path = Path(f.name)
     ok, stderr = _run([
         "ffmpeg", "-f", "concat", "-safe", "0",

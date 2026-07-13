@@ -64,8 +64,9 @@ class ProjectInitializer:
         """
         Detect the current scenario and act accordingly.
 
-        Resume scenario   → prints one info line, returns immediately.
-        New-show scenario → purge → OCR sample → LLM ROI → patch YAML → write checkpoint.
+        Resume scenario          → prints one info line, returns immediately.
+        Additive episode scenario → logs new files, updates checkpoint, returns.
+        New-show scenario        → purge → OCR sample → LLM ROI → patch YAML → write checkpoint.
         """
         current_videos = self._scan_videos()
 
@@ -74,6 +75,19 @@ class ProjectInitializer:
                 "[Init] Video set unchanged (%d file(s)) — resuming from checkpoint.",
                 len(current_videos),
             )
+            return
+
+        saved_videos = self._get_saved_video_list()
+        if saved_videos is not None and self._is_additive(current_videos, saved_videos):
+            new_files = sorted(
+                set(p.name for p in current_videos) - set(saved_videos)
+            )
+            logger.info(
+                "[Init] %d new episode(s) added to existing show — "
+                "updating checkpoint only (cache preserved): %s",
+                len(new_files), new_files,
+            )
+            self._write_checkpoint(current_videos)
             return
 
         logger.info(
@@ -110,6 +124,26 @@ class ProjectInitializer:
         if not self._raw_dir.exists():
             return []
         return sorted(self._raw_dir.rglob("*.mp4"), key=lambda p: str(p))
+
+    def _get_saved_video_list(self) -> Optional[list]:
+        """Return the saved video_list from the checkpoint, or None if unavailable."""
+        if not self._ckpt_path.exists():
+            return None
+        try:
+            with self._ckpt_path.open(encoding="utf-8") as fh:
+                ckpt = json.load(fh)
+            return ckpt.get("global", {}).get("video_list")
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def _is_additive(self, current_videos: list[Path], saved: list) -> bool:
+        """
+        Return True when current_videos is a strict superset of saved —
+        i.e. only new episodes were added, none removed or replaced.
+        """
+        current_rel = {p.relative_to(self._raw_dir).as_posix() for p in current_videos}
+        saved_set = set(saved)
+        return saved_set.issubset(current_rel) and len(current_rel) > len(saved_set)
 
     def _is_resume(self, current_videos: list[Path]) -> bool:
         """

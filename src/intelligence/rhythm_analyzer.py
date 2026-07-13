@@ -60,11 +60,13 @@ def _episode_from_scene_id(scene_id: str) -> str:
 def _cache_has_timecodes(cached: dict) -> bool:
     """Return True only if the cached map result has scene timecodes AND hook_start_time."""
     scenes = cached.get("scenes", [])
-    return (
-        bool(scenes)
-        and "scene_start_time" in scenes[0]
-        and "hook_start_time" in scenes[0]
-    )
+    if not scenes:
+        return False
+    # Check both first and last scene — LLM sometimes omits timecodes for trailing scenes
+    for scene in (scenes[0], scenes[-1]):
+        if "scene_start_time" not in scene or "hook_start_time" not in scene:
+            return False
+    return True
 
 
 def _build_jinja_env():
@@ -389,18 +391,29 @@ class RhythmAnalyzer:
         )
         total = len(clips)
 
-        if z1 == 4 and z2 == 3 and z3 == 3:
+        log_args = (z1, z2, z3, zone_counts["unknown"], total)
+        log_suffix = f"  LLM note: {note}" if note else ""
+        if total == 0:
+            return
+        if total != 10 or z1 == 0 or z2 == 0 or z3 == 0:
+            # Hard miss: wrong total or an entire zone is empty
+            logger.warning(
+                "RhythmAnalyzer: clip distribution off-target (expected 4/3/3) — "
+                "pre_first_pinch=%d  mid=%d  post_second_pinch=%d  unknown=%d  total=%d%s",
+                *log_args, log_suffix,
+            )
+        elif z1 == 4 and z2 == 3 and z3 == 3:
             logger.info(
                 "RhythmAnalyzer: clip distribution OK — "
                 "pre_first_pinch=%d  mid=%d  post_second_pinch=%d  total=%d",
                 z1, z2, z3, total,
             )
         else:
-            logger.warning(
-                "RhythmAnalyzer: clip distribution off-target (expected 4/3/3) — "
+            # Soft miss: total is 10 but zone spread differs — log INFO, not WARNING
+            logger.info(
+                "RhythmAnalyzer: clip distribution acceptable (target 4/3/3, got %d/%d/%d) — "
                 "pre_first_pinch=%d  mid=%d  post_second_pinch=%d  unknown=%d  total=%d%s",
-                z1, z2, z3, zone_counts["unknown"], total,
-                f"  LLM note: {note}" if note else "",
+                z1, z2, z3, *log_args, log_suffix,
             )
 
     def _build_conflict_chain(self, conflict_map: dict[str, dict]) -> str:
