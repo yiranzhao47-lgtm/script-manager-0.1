@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -51,13 +52,15 @@ def _build_scene_inventory(episode_conflicts: dict) -> str:
         scenes = episode_conflicts[ep_id].get("scenes", [])
         lines.append(f"=== EP{ep_id} ({len(scenes)} scenes) ===")
         for scene in scenes:
-            sid   = scene.get("scene_id", "?")
-            start = scene.get("scene_start_time", "?")
-            end   = scene.get("scene_end_time", "?")
-            dur   = max(0.0, _ts_to_sec(end) - _ts_to_sec(start))
-            actions = scene.get("scene_actions", [])
-            pivots  = scene.get("pivot_signals", [])
-            lines.append(f"[{sid}] {start}→{end} ({dur:.0f}s)")
+            sid      = scene.get("scene_id", "?")
+            start    = scene.get("scene_start_time", "?")
+            end      = scene.get("scene_end_time", "?")
+            hook_end = scene.get("hook_end_time") or ""
+            dur      = max(0.0, _ts_to_sec(end) - _ts_to_sec(start))
+            actions  = scene.get("scene_actions", [])
+            pivots   = scene.get("pivot_signals", [])
+            hook_end_str = f"  hook_end={hook_end}" if hook_end else ""
+            lines.append(f"[{sid}] {start}→{end} ({dur:.0f}s){hook_end_str}")
             for act in actions[:3]:
                 lines.append(f"  - {act}")
             for pv in pivots[:2]:
@@ -289,6 +292,8 @@ def _validate_plans(plans: dict, episode_conflicts: dict) -> list[str]:
             valid_times.add(sc.get("scene_end_time", ""))
             if sc.get("hook_start_time"):
                 valid_times.add(sc["hook_start_time"])
+            if sc.get("hook_end_time"):
+                valid_times.add(sc["hook_end_time"])
 
     for plan in plans.get("clip_plans", []):
         cid = plan.get("clip_id", "?")
@@ -320,6 +325,198 @@ def _validate_plans(plans: dict, episode_conflicts: dict) -> list[str]:
             prev_ep  = ep_num
             prev_end = _ts_to_sec(end)
     return warnings
+
+
+# ─── Layer 3: hook_end_time from scene data ──────────────────────────────────
+
+def _apply_hook_end_time(plans: dict, episode_conflicts: dict) -> int:
+    """
+    For each clip's final segment, replace end_time with the scene's hook_end_time
+    when available and meaningfully earlier than the scene boundary.
+
+    hook_end_time is a sub-scene timestamp pointing to the last open-tension line
+    (question, ultimatum, unresolved demand) — cutting there leaves the viewer
+    mid-confrontation instead of at the settled scene boundary.
+
+    Returns the count of clips adjusted.
+    """
+    hook_end_index: dict[str, str] = {}
+    for ep_data in episode_conflicts.values():
+        for scene in ep_data.get("scenes", []):
+            sid = scene.get("scene_id", "")
+            het = scene.get("hook_end_time") or ""
+            if sid and het:
+                hook_end_index[sid] = het
+
+    adjusted = 0
+    for plan in plans.get("clip_plans", []):
+        segs = plan.get("segments", [])
+        if not segs:
+            continue
+        last_seg = segs[-1]
+        if last_seg.get("_cliffhanger_cut"):
+            continue  # already handled
+
+        scene_ids    = last_seg.get("scene_ids", [])
+        last_sid     = scene_ids[-1] if scene_ids else ""
+        hook_end     = hook_end_index.get(last_sid, "")
+        current_end  = last_seg.get("end_time", "")
+
+        if not hook_end or not current_end:
+            continue
+        # Apply only when hook_end is at least 2 s before the scene boundary
+        if _ts_to_sec(current_end) - _ts_to_sec(hook_end) >= 2.0:
+            last_seg["end_time"]        = hook_end
+            last_seg["_cliffhanger_cut"] = True
+            adjusted += 1
+
+    return adjusted
+
+
+# ─── Layer 4: SRT line-scan fallback ─────────────────────────────────────────
+
+# SRT block: index, arrow line, one-or-more text lines
+_SRT_BLOCK_RE = re.compile(
+    r"\d+\r?\n"
+    r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\r?\n"
+    r"((?:.+\r?\n?)+)",
+    re.MULTILINE,
+)
+
+# Lines that signal open tension
+_SUSPENSE_RE = re.compile(
+    r"[？?]\s*$"           # ends with question mark
+    r"|[…\.]{2,}\s*$"      # trailing ellipsis
+    r"|(?:如果|否则|要么|不然|凭什么|难道|到底|究竟|你敢|怎么可能)",
+    re.UNICODE,
+)
+
+# Lines that close/resolve — avoid ending here
+_DECLARATIVE_RE = re.compile(r"[。！!]\s*$", re.UNICODE)
+
+
+def _parse_srt(srt_path: Path) -> list[tuple[str, str, str]]:
+    """Return list of (start_ts, end_ts, text) from an SRT file."""
+    try:
+        raw = srt_path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return []
+    return [(m.group(1), m.group(2), m.group(3).strip()) for m in _SRT_BLOCK_RE.finditer(raw)]
+
+
+def _find_suspense_cut(
+    srt_entries: list[tuple[str, str, str]],
+    seg_start: str,
+    seg_end: str,
+    min_gap_sec: float = 2.0,
+    max_lookback_sec: float = 20.0,
+) -> str | None:
+    """
+    Walk backward from seg_end within the segment window.
+    Returns the end_ts of the best suspense cut point, or None.
+
+    Priority:
+      1. Last line ending with ？ or …… (strong suspense signal)
+      2. Last line matching conditional/question patterns
+      3. Last line that does NOT end with 。 or ！ (weak fallback)
+    """
+    start_sec = _ts_to_sec(seg_start)
+    end_sec   = _ts_to_sec(seg_end)
+
+    window = [
+        (s, e, t) for s, e, t in srt_entries
+        if _ts_to_sec(s) >= start_sec - 0.1 and _ts_to_sec(e) <= end_sec + 0.1
+    ]
+    if not window:
+        return None
+
+    best_suspense: str | None = None
+    best_weak: str | None = None
+
+    for _s, end_ts, text in reversed(window):
+        gap = end_sec - _ts_to_sec(end_ts)
+        if gap < min_gap_sec:
+            continue
+        if gap > max_lookback_sec:
+            break
+
+        if _SUSPENSE_RE.search(text):
+            best_suspense = end_ts
+            break  # most recent suspense line — take it immediately
+        if best_weak is None and not _DECLARATIVE_RE.search(text):
+            best_weak = end_ts
+
+    return best_suspense or best_weak
+
+
+def _apply_srt_suspense_cut(
+    plans: dict,
+    episode_conflicts: dict,
+    srt_dir: Path,
+    min_gap_sec: float = 2.0,
+) -> int:
+    """
+    Layer 4: For clips that Layer 3 did not handle (no hook_end_time in scene data),
+    scan the SRT file backward from the last segment's end_time to find a better
+    suspense cut point.
+
+    Returns count of clips adjusted.
+    """
+    # Track which scene_ids already have hook_end_time (skip those — Layer 3 owns them)
+    has_hook_end: set[str] = {
+        scene.get("scene_id", "")
+        for ep_data in episode_conflicts.values()
+        for scene in ep_data.get("scenes", [])
+        if scene.get("hook_end_time")
+    }
+
+    srt_cache: dict[str, list] = {}
+    adjusted = 0
+
+    for plan in plans.get("clip_plans", []):
+        segs = plan.get("segments", [])
+        if not segs:
+            continue
+        last_seg = segs[-1]
+        if last_seg.get("_cliffhanger_cut"):
+            continue  # Layer 3 already handled this clip
+
+        scene_ids    = last_seg.get("scene_ids", [])
+        last_sid     = scene_ids[-1] if scene_ids else ""
+        if last_sid in has_hook_end:
+            continue  # scene has hook_end_time — Layer 3 should have applied it
+
+        ep_id = last_seg.get("episode_id", "")
+        if not ep_id:
+            continue
+
+        if ep_id not in srt_cache:
+            candidates = [srt_dir / f"{ep_id}.srt"]
+            try:
+                candidates.append(srt_dir / f"{int(ep_id):03d}.srt")
+                candidates.append(srt_dir / f"{int(ep_id):02d}.srt")
+            except ValueError:
+                pass
+            srt_cache[ep_id] = next(
+                (_parse_srt(p) for p in candidates if p.exists()), []
+            )
+
+        entries = srt_cache[ep_id]
+        if not entries:
+            continue
+
+        better = _find_suspense_cut(
+            entries,
+            last_seg.get("start_time", ""),
+            last_seg.get("end_time", ""),
+            min_gap_sec=min_gap_sec,
+        )
+        if better:
+            last_seg["end_time"]        = better
+            last_seg["_cliffhanger_cut"] = True
+            adjusted += 1
+
+    return adjusted
 
 
 def main(drama_name: str) -> int:
@@ -399,6 +596,17 @@ def main(drama_name: str) -> int:
     if n_extended:
         logger.info("Auto-extended %d plan(s) to reach ~165s target.", n_extended)
 
+    # Layer 3: apply hook_end_time from scene data (sub-scene precision)
+    n_hook = _apply_hook_end_time(plans, episode_conflicts)
+    if n_hook:
+        logger.info("Applied hook_end_time cut to %d clip(s) from scene data.", n_hook)
+
+    # Layer 4: SRT line-scan fallback for clips without hook_end_time
+    srt_dir = _ROOT / "data" / "output" / drama_name / "cn"
+    n_srt = _apply_srt_suspense_cut(plans, episode_conflicts, srt_dir)
+    if n_srt:
+        logger.info("Applied SRT suspense cut to %d clip(s) via line scan.", n_srt)
+
     # Attach source clip metadata
     for i, plan in enumerate(plans.get("clip_plans", [])):
         if i < len(marketing_clips):
@@ -444,7 +652,18 @@ def extend_only(drama_name: str) -> int:
     n_extended = _extend_short_plans(plans, episode_conflicts, target_sec=165)
     logger.info("Extended %d plan(s).", n_extended)
 
-    out_path.write_text(json.dumps(plans, ensure_ascii=False, indent=2), encoding="utf-8")
+    n_hook = _apply_hook_end_time(plans, episode_conflicts)
+    if n_hook:
+        logger.info("Applied hook_end_time cut to %d clip(s) from scene data.", n_hook)
+
+    srt_dir = _ROOT / "data" / "output" / drama_name / "cn"
+    n_srt = _apply_srt_suspense_cut(plans, episode_conflicts, srt_dir)
+    if n_srt:
+        logger.info("Applied SRT suspense cut to %d clip(s) via line scan.", n_srt)
+
+    tmp_path = out_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(plans, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(out_path)
 
     clip_list = plans.get("clip_plans", [])
     print(f"\n{'#':>3}  {'Title':<35}  {'Segs':>4}  {'actual s':>8}  {'ext?':>4}  Cliffhanger")

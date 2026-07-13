@@ -56,9 +56,18 @@ DESIGN RULES
    Record the FIRST SCENE THAT WOULD ANSWER the cliffhanger question as
    cliffhanger_scene_id. It must not appear in any segment.
 
+8a. HOOK-END CUT (sub-scene precision):
+   When the scene inventory shows a hook_end timestamp for your chosen last scene,
+   you MUST use that hook_end value as the final segment's end_time — NOT the
+   scene_end_time.
+   hook_end marks the exact subtitle line where the central question is posed but
+   not yet answered; cutting there leaves the viewer mid-tension.
+   If you use a hook_end value as end_time, it is already a valid timecode — you
+   do not need to find it in the scene boundary list.
+
 9. EXACT TIMECODES: every start_time and end_time you write for segments 2+
-   MUST appear verbatim as a scene_start_time or scene_end_time in the SCENE
-   INVENTORY below. Do not round, estimate, or invent timestamps.
+   MUST appear verbatim as a scene_start_time, scene_end_time, or hook_end in the
+   SCENE INVENTORY below. Do not round, estimate, or invent timestamps.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MARKETING CLIP STARTING POINTS

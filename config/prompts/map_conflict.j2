@@ -61,6 +61,23 @@ EXTRACTION RULES
    hook_start_time equals scene_start_time.
    Do NOT pick establishing shots, greetings, or scene-setting narration.
 
+9. hook_end_time: scan the SRT content for the LAST subtitle line in this scene
+   where tension is explicitly left open — a question without an answer, a
+   condition or threat without the outcome revealed, a confrontation mid-air.
+   Copy that line's END timestamp verbatim (HH:MM:SS,mmm format).
+   Qualifying lines (pick the LAST one that qualifies):
+     - Ends with a question mark (？)
+     - States a condition or ultimatum whose result is unknown (如果……/否则……/要么……)
+     - Is a demand or accusation that has not yet received a response
+     - Trails off without resolution (……)
+   Disqualifying lines — do NOT pick:
+     - Any line where a character answers, agrees, refuses, or decides
+     - Any line that closes the confrontation with a declarative statement
+     - Any line ending with 。 or ！ that resolves the situation
+   If the very last subtitle line qualifies, hook_end_time equals scene_end_time.
+   If no line in this scene qualifies (e.g. the scene ends on a resolution),
+   write null.
+
 ABSOLUTE PROHIBITION:
   ✗ No percentages, numeric scores, or intensity ratings of any kind
   ✗ No phrases like "crisis saturation", "tension level", "dramatic weight"
@@ -80,7 +97,8 @@ REQUIRED OUTPUT FORMAT  (strict JSON, no prose, no markdown)
       "time": "<time of day or temporal marker, e.g. 'morning', 'that night', 'three days later'>",
       "scene_start_time": "<HH:MM:SS,mmm — start timestamp of first subtitle in this scene>",
       "scene_end_time": "<HH:MM:SS,mmm — end timestamp of last subtitle in this scene>",
-      "hook_start_time": "<HH:MM:SS,mmm — timestamp of first conflict-carrying line; equals scene_start_time if scene opens directly on conflict>",
+      "hook_start_time": "<HH:MM:SS,mmm — START timestamp of first conflict-carrying line; equals scene_start_time if scene opens directly on conflict>",
+      "hook_end_time": "<HH:MM:SS,mmm — END timestamp of last open-tension line (question/threat/demand without resolution); null if no qualifying line>",
       "scene_actions": [
         "<action or decision — factual, causal>",
         "..."
