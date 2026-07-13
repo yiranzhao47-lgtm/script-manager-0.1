@@ -1,6 +1,6 @@
 # cc_script_manager — 短剧字幕自动化流水线
 
-> **80集全量测试通过（胜爱情战争）** · **英文剧集支持（Dollar Baby 54集，¥0.45）** · 双轨多语言翻译矩阵（EN / FR / ES）· 付费墙战略报告 · 检查点断点续传 · DeepSeek + Claude API 驱动
+> **80集全量测试通过（胜爱情战争）** · **英文剧集支持（Dollar Baby 54集，¥0.45）** · 双轨多语言翻译矩阵（EN / FR / ES）· 付费墙战略报告 · Stage 6 广告素材自动生产（含悬念结尾精准剪切）· 检查点断点续传 · DeepSeek + Claude API 驱动
 
 ---
 
@@ -123,8 +123,9 @@
 | 智能 | `paywall_strategist.py` | 读取 drama_structure_graph.json，以 JSON 中 first_pinch / second_pinch 为确定卡点，Claude 撰写深度运营分析 + 营销素材剪辑建议（8-10 条）|
 | 翻译 | `translation_matrix.py` | 双轨多语言翻译矩阵：DeepSeek 骨架 + Claude 润色 + 多语言并发（EN / FR / ES 默认开启） |
 | 素材 | `scripts/extract_clips.py` | 读 drama_structure_graph.json 的锚点列表，调用 ffmpeg 裁剪每个锚点为独立片段；idempotent |
-| 素材 | `scripts/plan_clips.py` | DeepSeek LLM 二次规划：从锚点片段中选取最优组合，输出 clip_plans.json；skip-if-exists 保护 |
+| 素材 | `scripts/plan_clips.py` | DeepSeek LLM 规划 ~3 分钟延伸方案；Layer 3 从场景数据替换尾帧时间码；Layer 4 SRT 行扫描兜底悬念剪切；输出 clip_plans.json |
 | 素材 | `scripts/assemble_clips.py` | 读 clip_plans.json，ffmpeg 二次编码（-crf 18）+ filter_complex concat，输出 ext_*.mp4；skip-if-exists 保护 |
+| 素材 | `scripts/write_copy.py` | 读 clip_plans.json + drama_structure_graph.json，Claude 生成多平台广告文案，输出 creatives/ad_copy.csv |
 | 工具 | `scripts/reset_checkpoint.py` | 安全回滚单集检查点状态（Python，无 BOM 风险）；接受 `<drama_name>` 参数 |
 
 ### 1.2　Strategy 模式：两个开关驱动全系统行为
@@ -720,7 +721,13 @@ cross_lang:                # ④ 若 cross_lang：
 ROI 值确定方法：用 VLC 截图，量取字幕上边距 / 画面总高度 和 字幕下边距 / 画面总高度，对应 `[y_start_ratio, y_end_ratio]`。
 
 **ProjectInitializer 自动修复（每次运行时触发）：**
-- 检测视频集合变化 → 清除**该剧**缓存（asr / ocr / aligned / drama_map），meta 也重置
+
+| 场景 | 判定条件 | 动作 |
+|------|---------|------|
+| 继续运行 | 视频集合与 checkpoint 完全一致 | 单行日志，直接返回 |
+| 追加集数 | 当前集合是已保存集合的超集（仅有新增，无删除/替换） | 仅更新 checkpoint，**保留所有现有缓存**（asr/ocr/aligned/map）|
+| 新剧 / 视频替换 | 其他所有情况 | 清除该剧缓存 → OCR 推断 ROI → 更新 `settings.yaml` |
+
 - 对第一集第 15 秒帧做全屏 OCR → LLM 推断字幕 ROI → 自动更新 `settings.yaml` 中的 `roi:` 值
 - 如 ROI 推断失败（无 API Key），保留现有 `roi:` 值并继续
 
@@ -863,6 +870,12 @@ data/
      │             scene_id          "ep01_sc_01"（零填充两位）           │
      │             location          场景地点                             │
      │             time              时间标记                             │
+     │             scene_start_time  第一条字幕 START 时间码              │
+     │             scene_end_time    最后一条字幕 END 时间码              │
+     │             hook_start_time   场景内第一句冲突台词的 START 时间码  │
+     │             hook_end_time     场景内最后一句悬而未决台词的 END 时间码│
+     │                               （问句/条件威胁/未获回应的对峙；     │
+     │                                 null 表示该场景以收尾台词结束）    │
      │             scene_actions[]   关键行为列表                         │
      │             unresolved_debt   遗留因果债（可空）                   │
      │             pivot_signals[]   故事转折信号                         │
@@ -996,8 +1009,11 @@ pricing:
 | 文件 | 来源 | 定价 key |
 |------|------|---------|
 | `data/output/<show>/cost_report_deepseek.json` | 主流水线 Stage 3-5（DeepSeek） | `deepseek-chat` |
+| `data/output/<show>/cost_report_deepseek_translation.json` | 翻译矩阵 DeepSeek 骨架（Stage 7） | `deepseek-chat` |
 | `data/output/<show>/cost_report_claude.json` | 翻译矩阵 Claude 润色（EN refine） | `anthropic/claude-sonnet-4-5` |
 | `data/output/<show>/cost_report_paywall.json` | `--paywall-report` 付费墙报告 | `anthropic/claude-sonnet-4-5` |
+
+**历史追加（cost_history.jsonl）：** 每次运行结束时，`CostAuditor._append_history()` 将本次成本记录追加至 `data/output/<show>/cost_history.jsonl`（JSONL 格式，一行一记录，永不覆盖）。重新运行流水线时，即使本次无新 API 调用（全量命中缓存），历史文件也保留所有历史数据，主报告 JSON 的"空运行覆盖保护"防止以 0 覆盖真实费用记录。
 
 ```json
 {
@@ -1360,11 +1376,11 @@ intelligence:
 
 > **前提：** `drama_structure_graph.json` 已由 Stage 5 生成（包含 `marketing_clips` 和 `episode_conflicts`）。视频文件位于 `data/raw/<drama_name>/`。
 
-### 7.1　三步工作流
+### 7.1　四步工作流
 
 ```
 drama_structure_graph.json
-  marketing_clips（Reduce 阶段选出的 6-10 个情绪冲突锚点）
+  marketing_clips（Reduce 阶段选出的 10 个情绪冲突锚点）
          │
    Step 1 ─ extract_clips.py
          │  每个锚点 → 独立短片（30-60 s）
@@ -1373,33 +1389,46 @@ drama_structure_graph.json
    Step 2 ─ plan_clips.py
          │  LLM 为每条短片规划 ~3 分钟延伸方案（clip_plans.json）
          │  自动后处理：追加场景直到累计时长 ≥ 165 s，在下一个情绪节点前停住
+         │  悬念结尾精准剪切（Layer 3+4）——见 §7.5
          │  输出: data/output/<drama>/clip_plans.json
          │
    Step 3 ─ assemble_clips.py
          │  按 clip_plans.json 分段提取 + ffmpeg concat 拼接
          │  输出: data/output/<drama>/creatives/ext_NN_<title>.mp4
+         │
+   Step 4 ─ write_copy.py
+         │  Claude 读取 clip_plans.json + drama_structure_graph.json
+         │  为每条素材生成多平台广告文案（标题 / 钩子 / 正文）
+         │  输出: data/output/<drama>/creatives/ad_copy.csv
 ```
 
 ### 7.2　完整命令
 
 ```powershell
-# API Key（Step 2 调用 LLM 时需要）
-$env:DEEPSEEK_API_KEY = "your_key_here"
+# API Key（Step 2/4 调用 LLM 时需要）
+$env:DEEPSEEK_API_KEY   = "your_deepseek_key"
+$env:OPENROUTER_API_KEY = "your_openrouter_key"   # Step 4 ad copy 使用 Claude
 
 # Step 1：提取短版切片（30-60 s）
 python scripts/extract_clips.py "<drama_name>"
 
-# Step 2：LLM 规划 3 分钟延伸版本
+# Step 2：LLM 规划 3 分钟延伸版本（含悬念结尾剪切）
 python scripts/plan_clips.py "<drama_name>"
 
 # Step 3：组装最终素材
 python scripts/assemble_clips.py "<drama_name>"
 
-# 仅重跑 Step 2 的后处理延伸（不调 LLM，重用现有 clip_plans.json）
+# Step 4：生成广告文案
+python scripts/write_copy.py "<drama_name>"
+
+# 仅重跑 Step 2 的后处理（不调 LLM：重用现有 LLM 规划，重新做悬念结尾剪切 + 延伸）
 python scripts/plan_clips.py "<drama_name>" --extend-only
 
 # 仅组装指定 clip（如 1、3、5）
 python scripts/assemble_clips.py "<drama_name>" 1 3 5
+
+# 全流程四步一次运行（主流水线 Stage 6 内部自动执行）
+python pipeline.py "<drama_name>"
 ```
 
 ### 7.3　剪辑逻辑
@@ -1430,21 +1459,45 @@ max_sec = target_sec + 50   ← 硬天花板（默认 215 s）
 
 **关键设计：** 追踪的是**段跨度**（包含场间空隙），而非各场景时长之和，避免因短剧场间转场导致低估实际视频时长。
 
-### 7.5　输出结构
+### 7.5　悬念结尾精准剪切（四层机制）
+
+**问题背景：** 剪辑方案的结尾时间码落在 `scene_end_time`——场景最后一条字幕结束时刻。而场景的最后几句话通常是收尾陈述（"我知道了"、"事情就这样定了。"），悬念峰值实际发生在场景中间：问题被提出、威胁被发出、对峙正在进行的那一刻。
+
+**四层解决方案（依优先级顺序）：**
+
+| Layer | 位置 | 作用 | 覆盖范围 |
+|-------|------|------|---------|
+| L1 | `map_conflict.j2` | Map 阶段 LLM 输出每个场景的 `hook_end_time`：场景内最后一句开放式台词的 END 时间码 | 新剧（从数据源头建立） |
+| L2 | `clip_planner.j2` | 场景清单中显示 `hook_end`；规则 8a 要求 LLM 在规划最后一段时优先使用它作为 `end_time` | 新剧（LLM 主动选择） |
+| L3 | `plan_clips.py` `_apply_hook_end_time()` | LLM 回包后检查最后段的 `scene_id`，若该场景有 `hook_end_time` 且比 `scene_end_time` 早 ≥ 2 s，自动替换 `end_time` | 新剧（LLM 未选时保底） |
+| L4 | `plan_clips.py` `_apply_srt_suspense_cut()` | 加载对应集的 SRT，从 `end_time` 向前最多扫描 20 s，找到最后一句以 `？` / `……` 结尾或含 `如果/否则/难道/到底` 等词的台词，替换 `end_time` | 所有剧（无 hook_end_time 数据时的纯代码兜底） |
+
+**`hook_end_time` 选取标准（map_conflict.j2 对 LLM 的约束）：**
+- ✅ 以问号结尾（`？`）
+- ✅ 条件或最后通牒（如果……否则……要么……）
+- ✅ 对峙中尚未得到回应的指控或要求
+- ✅ 话语断开（`……`）
+- ❌ 排除：角色已答复、同意、拒绝或做出决定的台词
+- ❌ 排除：以收尾标点（`。！`）结尾的解决性陈述
+
+Layer 3+4 在 `_extend_short_plans()` **之后**执行，确保自动延伸新增的末段也得到同等处理。`--extend-only` 模式同样包含 Layer 3+4。
+
+### 7.6　输出结构
 
 ```
 data/output/<drama_name>/
   clip_plans.json              ← Step 2 生成：10 条延伸方案（含 segments / cliffhanger）
   creatives/
-    clip_01_ep01_cold_open.mp4  ← Step 1 短版（30-60 s）
+    clip_01_ep01_cold_open.mp4        ← Step 1 短版（30-60 s）
     clip_02_ep09_confrontation_cut.mp4
     ...
-    ext_01_Campus Slut Exposed.mp4   ← Step 3 最终素材（~3 min）
+    ext_01_Campus Slut Exposed.mp4    ← Step 3 最终素材（~3 min，悬念精准剪切）
     ext_02_Daughter in Danger.mp4
     ...
+    ad_copy.csv                       ← Step 4 广告文案（标题 / 钩子 / 正文）
 ```
 
-### 7.6　Dollar Baby 实测结果（2026-07-10）
+### 7.7　Dollar Baby 实测结果（2026-07-10）
 
 | # | 标题 | 时长 | 大小 | Cliffhanger |
 |---|------|------|------|-------------|
