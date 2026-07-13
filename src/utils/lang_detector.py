@@ -495,10 +495,13 @@ def run_preflight(cfg: dict, video_dir: Path) -> DetectionReport:
 
 def detect_language(video_dir: Path, cfg: dict) -> str:
     """
-    Auto-detect source language from video subtitle frames.
+    Auto-detect source language from video subtitle frames, with audio fallback.
 
-    Returns "zh" if CJK dominant, "en" otherwise.
-    Falls back to the configured source_language if OCR yields no text.
+    Strategy:
+      1. OCR on sampled frames (fast, no model load after first call).
+      2. If OCR yields no text (no hard-burned subtitles), try Whisper-tiny
+         audio detection on the first episode video.
+      3. If audio detection also fails, fall back to configured source_language.
 
     Always uses the Chinese OCR model (lang="ch") which handles both CJK and
     Latin scripts, so detection works regardless of the configured language.
@@ -512,11 +515,32 @@ def detect_language(video_dir: Path, cfg: dict) -> str:
         return "zh"
     if dominant == "latin":
         return "en"
-    # "unknown" — OCR found no text; fall back to configured value
+
+    # OCR found no text — try audio detection on the first episode video
+    logger.warning(
+        "detect_language: OCR found no subtitle text in '%s' — trying audio detection",
+        video_dir,
+    )
+    video_exts: frozenset[str] = frozenset(
+        {".mp4", ".mkv", ".avi", ".mov", ".flv", ".ts", ".m4v", ".wmv"}
+    )
+    videos = sorted(
+        (p for p in video_dir.iterdir() if p.suffix.lower() in video_exts),
+        key=_natural_sort_key,
+    )
+    if videos:
+        audio_lang = detect_audio_language(videos[0])
+        if audio_lang in ("zh", "en"):
+            logger.info(
+                "detect_language: audio detection resolved language='%s' for '%s'",
+                audio_lang, video_dir,
+            )
+            return audio_lang
+
     fallback = cfg.get("pipeline", {}).get("source_language", "zh")
     logger.warning(
-        "detect_language: no OCR text found in '%s' — falling back to configured '%s'",
-        video_dir, fallback,
+        "detect_language: audio detection inconclusive — falling back to configured '%s'",
+        fallback,
     )
     return fallback
 
@@ -565,16 +589,21 @@ def detect_pipeline_mode(video_dir: Path, cfg: dict) -> tuple[str, str]:
       subtitle=zh                    → same_lang, source_language=zh
       subtitle=en, audio=zh          → cross_lang, source_language=en
       subtitle=en, audio=en/unknown  → same_lang, source_language=en
+      subtitle=unknown, audio=zh     → same_lang, source_language=zh  (no hard subs)
+      subtitle=unknown, audio=en     → same_lang, source_language=en  (no hard subs)
+
+    detect_language() already tries audio as a secondary signal when OCR yields
+    nothing, so subtitle_lang here is already the best available estimate.
 
     Returns (mode, source_language).
     """
     subtitle_lang = detect_language(video_dir, cfg)
 
     if subtitle_lang == "zh":
-        logger.info("Pipeline mode auto-detected: same_lang (zh subtitle)")
+        logger.info("Pipeline mode auto-detected: same_lang (zh)")
         return "same_lang", "zh"
 
-    # Subtitle is Latin/English — inspect audio to distinguish same_lang vs cross_lang
+    # subtitle is English — inspect audio to distinguish same_lang vs cross_lang
     video_exts: frozenset[str] = frozenset(
         {".mp4", ".mkv", ".avi", ".mov", ".flv", ".ts", ".m4v", ".wmv", ".mp2t"}
     )

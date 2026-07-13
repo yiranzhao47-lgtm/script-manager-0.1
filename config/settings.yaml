@@ -102,7 +102,7 @@ gpu:
 # ── Language pre-flight detection ─────────────────────────────────────────────
 lang_detection:
   episodes_to_check: 3            # inspect first N episodes
-  frames_per_episode: 5           # random frames sampled per episode
+  frames_per_episode: 15          # random frames sampled per episode
   cjk_ratio_threshold: 0.30       # fraction of CJK chars that means "Chinese dominant"
   fatal_on_mismatch: true         # abort pipeline on mode / video-language conflict
 
