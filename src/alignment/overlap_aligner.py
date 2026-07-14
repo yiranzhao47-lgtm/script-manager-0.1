@@ -7,6 +7,8 @@ LLM prompt templates and downstream code never branch on mode.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   same_lang  — ASR is Master, OCR is Context
+            exception: when source_language="en", OCR is Master
+            (burned-in English subtitles are authoritative; ASR is context)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   For every ASR segment:
 
@@ -161,6 +163,7 @@ class OverlapAligner:
 
     def __init__(self, cfg: dict) -> None:
         self._mode: str = cfg["pipeline"]["mode"]
+        self._source_language: str = cfg.get("pipeline", {}).get("source_language", "zh")
         self._asr_role: str = (
             "master"
             if self._mode == "same_lang"
@@ -270,6 +273,10 @@ class OverlapAligner:
                 "[%s] No OCR blocks — context_available will be False for all %d segments",
                 episode_id, len(asr_segs),
             )
+
+        # ── English same_lang: OCR-as-master (burned-in EN subtitles are authoritative) ──
+        if self._source_language == "en":
+            return self._align_ocr_rescue(episode_id, asr_segs, ocr_blocks, reason="en_primary")
 
         # ── Sparse-ASR rescue: flip to OCR-as-master when ASR barely transcribed ──
         # NOTE: checked before the empty-ASR guard so that episodes where ALL ASR
@@ -459,17 +466,26 @@ class OverlapAligner:
         episode_id: str,
         asr_segs: list[dict],
         ocr_blocks: list[dict],
+        reason: str = "sparse_asr",
     ) -> list[AlignedSegment]:
         """
-        Fallback for same_lang episodes where Whisper produced too few segments
-        (heavy BGM suppressing speech detection).  Uses OCR blocks as master;
-        any surviving ASR segments become context for downstream LLM refinement.
+        OCR-as-master alignment path.  Two entry points:
+          reason="en_primary"  — English drama: burned-in subtitles are authoritative.
+          reason="sparse_asr"  — Fallback: Whisper produced too few segments (heavy BGM).
+        Any surviving ASR segments become context for downstream LLM refinement.
         """
-        logger.warning(
-            "[%s] ASR sparse (%d segment(s) < threshold %d) — "
-            "rescue: %d OCR block(s) promoted to master",
-            episode_id, len(asr_segs), self._asr_min_segs, len(ocr_blocks),
-        )
+        if reason == "en_primary":
+            logger.info(
+                "[%s] English subtitle drama — OCR primary: %d block(s) as master, "
+                "%d ASR segment(s) as context",
+                episode_id, len(ocr_blocks), len(asr_segs),
+            )
+        else:
+            logger.warning(
+                "[%s] ASR sparse (%d segment(s) < threshold %d) — "
+                "rescue: %d OCR block(s) promoted to master",
+                episode_id, len(asr_segs), self._asr_min_segs, len(ocr_blocks),
+            )
         ocr_blocks = self._dedup_rescue_blocks(ocr_blocks, episode_id)
         results: list[AlignedSegment] = []
         for idx, blk in enumerate(ocr_blocks):
@@ -626,7 +642,11 @@ class OverlapAligner:
         return {
             "episode": episode_id,
             "mode": self._mode,
-            "asr_role": self._asr_role,
+            "asr_role": (
+                "context"
+                if self._mode == "same_lang" and self._source_language == "en"
+                else self._asr_role
+            ),
             "segment_count": n,
             "stats": {
                 "with_context": n_ctx,
