@@ -278,8 +278,11 @@ class SubtitleEraser:
         )
 
         # ── Decode: ffmpeg → raw BGR frames ──────────────────────────────
+        # -hwaccel cuda offloads HEVC/H.264 decode to the GPU; frames are
+        # copied back to CPU memory automatically before the pipe output.
         decode_proc = subprocess.Popen(
-            ["ffmpeg", "-i", str(input_path),
+            ["ffmpeg", "-hwaccel", "cuda",
+             "-i", str(input_path),
              "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -294,7 +297,7 @@ class SubtitleEraser:
                 "-i", "pipe:0",
                 "-i", str(input_path),
                 "-map", "0:v", "-map", "1:a?",
-                "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
+                *self._encode_args(),
                 "-c:a", "copy",
                 "-movflags", "+faststart",
                 str(output_path),
