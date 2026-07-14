@@ -299,9 +299,13 @@ class ShortDramaPipeline:
         )
         self._log_checkpoint_summary(episode_ids)
 
-        # ── Dry-run guard (new show only; silent on resume) ───────────────
+        # ── Dry-run guard — first pass ────────────────────────────────────
+        # On resume: aligned data exists → prints estimate, no prompt.
+        # On new show: aligned data not yet available → silent, will re-check
+        # below after Stage 2 produces the aligned cache.
         from src.utils.dry_run import DryRunGuard
-        if not DryRunGuard(self._cfg).check_and_confirm(episode_ids, yes=yes):
+        _guard = DryRunGuard(self._cfg)
+        if not _guard.check_and_confirm(episode_ids, yes=yes):
             sys.exit(0)
 
         # ── Stage 0: Pre-flight ───────────────────────────────────────────
@@ -313,6 +317,12 @@ class ShortDramaPipeline:
 
         # ── ASR language sanity check (fail-fast before any LLM tokens) ───
         self._validate_asr_language(episodes)
+
+        # ── Dry-run guard — second pass (new show only) ───────────────────
+        # Aligned cache now exists → print estimate + prompt before Stage 3
+        # spends any tokens.  On resume this is a no-op (_is_resume → True).
+        if not _guard.check_and_confirm(episode_ids, yes=yes, prompt_on_new=not yes):
+            sys.exit(0)
 
         # ── Stage 3: MapReduce ─────────────────────────────────────────────
         meta = self._phase_map_reduce(episode_ids)

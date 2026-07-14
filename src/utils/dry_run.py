@@ -1,25 +1,32 @@
 """
-Dry-run guard — Form B interaction.
+Dry-run guard — pre-flight cost estimator with optional user confirmation.
 
-Triggered automatically on a fresh run (no checkpoint progress for the
-current episode list).  Silent on checkpoint resume or when --yes is passed.
+pipeline.py calls check_and_confirm() twice on the same guard instance:
+  Pass 1  — before Stage 0, immediately at startup
+  Pass 2  — after Stage 1+2, before Stage 3 (new-show path only)
 
 Behavior
 ────────
-  New show (no checkpoint progress)
-    → Run TokenCounter, print budget table, prompt "Proceed? [Y/n]"
-    → If aligned cache is empty (Stages 1+2 not yet run), skip silently
   Checkpoint resume (≥1 episode past "pending")
-    → Return immediately — no output, no prompt
+    Pass 1: aligned cache exists → print budget table, no prompt.
+    Pass 2: estimate already printed → silent no-op.
+  New show — no prior progress
+    Pass 1: no aligned cache yet → silent (cannot estimate).
+    Pass 2: aligned cache produced by Stage 2 → print table → prompt "Proceed? [Y/n]"
   --yes flag
-    → Skip prompt regardless of checkpoint state
+    Skip prompt regardless of checkpoint state; estimate table still printed.
 
 Usage
 ─────
     from src.utils.dry_run import DryRunGuard
 
     guard = DryRunGuard(cfg)
+    # Pass 1 — at startup
     if not guard.check_and_confirm(episode_ids, yes=args.yes):
+        sys.exit(0)
+    # ... Stage 1+2 ...
+    # Pass 2 — after ingestion (new show only; resume is a no-op)
+    if not guard.check_and_confirm(episode_ids, yes=args.yes, prompt_on_new=not args.yes):
         sys.exit(0)
 """
 from __future__ import annotations
@@ -46,12 +53,18 @@ class DryRunGuard:
         self._cfg = cfg
         cache_dir = Path(cfg["paths"]["cache_dir"])
         self._ckpt_path = cache_dir / "checkpoint.json"
+        self._estimate_shown = False  # avoid double-printing on two-pass call
 
     # ------------------------------------------------------------------ #
     #  Public                                                              #
     # ------------------------------------------------------------------ #
 
-    def check_and_confirm(self, episode_ids: list[str], yes: bool = False) -> bool:
+    def check_and_confirm(
+        self,
+        episode_ids: list[str],
+        yes: bool = False,
+        prompt_on_new: bool = True,
+    ) -> bool:
         """
         Return True if the pipeline should proceed, False if the user aborted.
 
@@ -61,23 +74,35 @@ class DryRunGuard:
             Full list of episode IDs discovered for this run.
         yes:
             If True, skip the interactive prompt (for CI / scripted runs).
+        prompt_on_new:
+            If False, show the estimate but skip the Y/n prompt even for new
+            shows.  Used by the post-ingestion call so the estimate is always
+            printed but never double-prompts.
         """
-        if self._is_resume(episode_ids):
-            logger.debug("DryRunGuard: checkpoint resume detected — skipping pre-flight estimate")
+        is_resume = self._is_resume(episode_ids)
+
+        # Always attempt token estimation — prints the table when data exists.
+        estimate = self._run_estimate()
+
+        if is_resume:
+            if estimate:
+                logger.debug("DryRunGuard: resume — token estimate shown above (no prompt)")
+            else:
+                logger.debug("DryRunGuard: resume — no aligned cache yet, estimate unavailable")
             return True
 
-        # New show — attempt token estimation (prints the table internally)
-        estimate = self._run_estimate()
+        # New show path
         if not estimate:
-            # No aligned data yet (Stages 1+2 haven't run) — nothing to estimate
+            # Aligned data not yet available — will re-check after Stage 2
             logger.debug(
                 "DryRunGuard: no aligned cache found — "
-                "skipping pre-flight estimate (run Stages 1+2 first for cost data)"
+                "estimate will appear after Stage 2 completes"
             )
             return True
 
-        if yes:
-            logger.info("DryRunGuard: --yes flag set — skipping confirmation prompt")
+        if yes or not prompt_on_new:
+            if yes:
+                logger.info("DryRunGuard: --yes flag set — skipping confirmation prompt")
             return True
 
         return self._prompt_user()
@@ -104,10 +129,16 @@ class DryRunGuard:
         )
 
     def _run_estimate(self) -> dict:
-        """Run TokenCounter; return empty dict on failure or no data."""
+        """Run TokenCounter; return empty dict on failure or no data.
+        Skips silently if the estimate table has already been printed this run."""
+        if self._estimate_shown:
+            return {}
         try:
             from src.utils.token_counter import TokenCounter
-            return TokenCounter(self._cfg).estimate()
+            result = TokenCounter(self._cfg).estimate()
+            if result:
+                self._estimate_shown = True
+            return result
         except Exception as exc:
             logger.debug("DryRunGuard: TokenCounter raised %s — skipping estimate", exc)
             return {}
