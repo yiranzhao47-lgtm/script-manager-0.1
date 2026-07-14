@@ -1,30 +1,22 @@
 """
-Frame-level subtitle eraser using PaddleOCR detection + OpenCV inpainting.
+Subtitle eraser with two backends.
 
-Inpainting backend: cv2.inpaint with the TELEA algorithm.
-For subtitle regions (small, bounded text blocks), TELEA propagates boundary
-pixels inward to reconstruct the background.  Quality is sufficient for
-marketing clips where the subtitle zone is small and transient.
-No additional packages are required beyond what the project already uses.
+backend="delogo"  (default, fast)
+──────────────────────────────────
+Single FFmpeg invocation using the built-in ``delogo`` filter.  The filter
+reconstructs the subtitle band by interpolating from its border pixels — no
+Python frame loop, no model inference.  GPU encode via h264_nvenc when
+available (auto-detected).
 
-Algorithm per frame
-───────────────────
-1. Crop the subtitle ROI band from the frame (bottom ~16 % by default).
-2. Run PaddleOCR on the crop to detect text bounding boxes.
-3. Temporal mask cache: if the detected text matches the previous frame's
-   text, reuse the cached mask (skips mask rebuild; inpainting still runs per
-   frame because the background changes even when text stays).
-4. Build a dilated binary mask from the bounding boxes.
-5. Run cv2.inpaint(TELEA, radius=3) on the ROI crop.
-6. Paste the inpainted crop back into the full frame.
-7. Write the processed frame to the ffmpeg encode pipe.
+Expected throughput: 3–10× realtime (vs ~0.1× realtime with the inpaint
+backend when PaddleOCR falls back to CPU).
 
-Performance (RTX 4060, 1080p, 24 fps)
-──────────────────────────────────────
-  PaddleOCR on ROI : ~5 ms/frame  × 1440 = ~7 s / min of video
-  cv2.inpaint TELEA: ~2 ms/frame  × 1440 = ~3 s / min
-  Frame I/O        : ~3 ms/frame  × 1440 = ~4 s / min
-  Total            : ~14 s per minute of video  (0.25× realtime)
+backend="inpaint"  (accurate, slow)
+─────────────────────────────────────
+Frame-level PaddleOCR detection + cv2.inpaint TELEA.  Each frame is decoded
+through a pipe, OCR-detected, inpainted, and re-encoded.  Use this backend
+only when delogo reconstruction quality is visually unacceptable (e.g. very
+complex backgrounds in the subtitle zone).
 """
 from __future__ import annotations
 
@@ -72,13 +64,16 @@ class SubtitleEraser:
         dilation_px: int = 8,
         inpaint_radius: int = 3,
         ocr_lang: str = "ch",
+        backend: str = "delogo",
     ) -> None:
         self._roi            = roi
         self._use_gpu        = use_gpu
         self._dilation       = dilation_px
         self._inpaint_radius = inpaint_radius
         self._ocr_lang       = ocr_lang
+        self._backend        = backend
         self._ocr            = None
+        self._nvenc_ok: Optional[bool] = None   # lazily probed
 
     # ------------------------------------------------------------------ #
     #  Lazy model loading                                                  #
@@ -172,15 +167,91 @@ class SubtitleEraser:
         return cv2.inpaint(roi_bgr, mask, self._inpaint_radius, cv2.INPAINT_TELEA)
 
     # ------------------------------------------------------------------ #
+    #  GPU / encoder helpers                                               #
+    # ------------------------------------------------------------------ #
+
+    def _check_nvenc(self) -> bool:
+        """Return True if h264_nvenc is usable on this machine (probed once)."""
+        if self._nvenc_ok is None:
+            r = subprocess.run(
+                ["ffmpeg", "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.04",
+                 "-c:v", "h264_nvenc", "-f", "null", "-"],
+                capture_output=True,
+            )
+            self._nvenc_ok = r.returncode == 0
+            logger.info(
+                "SubtitleEraser: h264_nvenc probe → %s",
+                "available" if self._nvenc_ok else "not available (will use libx264)",
+            )
+        return self._nvenc_ok
+
+    def _encode_args(self) -> list[str]:
+        """Return ffmpeg video-encode flags (GPU if nvenc available)."""
+        if self._check_nvenc():
+            return ["-c:v", "h264_nvenc", "-cq", "18", "-preset", "p4",
+                    "-pix_fmt", "yuv420p"]
+        return ["-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-pix_fmt", "yuv420p"]
+
+    # ------------------------------------------------------------------ #
+    #  delogo backend (default)                                            #
+    # ------------------------------------------------------------------ #
+
+    def _process_video_delogo(self, input_path: Path, output_path: Path) -> bool:
+        """
+        Erase the subtitle ROI band using FFmpeg's delogo filter.
+
+        The filter fills the rectangle by interpolating from its border
+        pixels — no per-frame OCR or Python frame loop.  GPU encode is used
+        when h264_nvenc is available.
+        """
+        try:
+            w, h, fps = self._probe_video(input_path)
+        except Exception as exc:
+            logger.error("SubtitleEraser(delogo): probe failed — %s", exc)
+            return False
+
+        roi_y0 = int(h * self._roi[0])
+        roi_y1 = int(h * self._roi[1])
+        roi_h  = roi_y1 - roi_y0
+
+        delogo = f"delogo=x=0:y={roi_y0}:w={w}:h={roi_h}:show=0"
+        logger.info(
+            "SubtitleEraser(delogo): %s  %dx%d@%.2ffps  ROI y=[%d:%d]  nvenc=%s",
+            input_path.name, w, h, fps, roi_y0, roi_y1, self._check_nvenc(),
+        )
+
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(input_path),
+             "-vf", delogo,
+             *self._encode_args(),
+             "-c:a", "copy",
+             "-movflags", "+faststart",
+             str(output_path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if r.returncode != 0:
+            tail = r.stderr.strip().splitlines()
+            logger.error("SubtitleEraser(delogo): %s", tail[-1] if tail else "(empty)")
+            return False
+        return True
+
+    # ------------------------------------------------------------------ #
     #  Public entry point                                                  #
     # ------------------------------------------------------------------ #
 
     def process_video(self, input_path: Path, output_path: Path) -> bool:
         """
         Erase subtitles from *input_path* and write the result to *output_path*.
-        Audio is preserved by muxing from the original file.
-        Returns True on success.
+        Audio is preserved.  Returns True on success.
+        Dispatches to delogo or inpaint backend based on self._backend.
         """
+        if self._backend == "delogo":
+            return self._process_video_delogo(input_path, output_path)
+        return self._process_video_inpaint(input_path, output_path)
+
+    def _process_video_inpaint(self, input_path: Path, output_path: Path) -> bool:
+        """Original per-frame PaddleOCR + cv2.inpaint path."""
         self._ensure_ocr()
 
         try:

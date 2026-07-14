@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -48,6 +49,27 @@ _SUBTITLE_STYLE = (
     "FontName=Bitter,FontSize=13,Outline=2,Shadow=2,"
     "MarginL=20,MarginR=20,MarginV=60,Alignment=2"
 )
+
+# GPU encoder — probed once at startup, used for extract and burn steps.
+_nvenc_available: bool | None = None
+
+def _nvenc() -> bool:
+    global _nvenc_available
+    if _nvenc_available is None:
+        r = subprocess.run(
+            ["ffmpeg", "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.04",
+             "-c:v", "h264_nvenc", "-f", "null", "-"],
+            capture_output=True,
+        )
+        _nvenc_available = r.returncode == 0
+        tag = "h264_nvenc" if _nvenc_available else "libx264 (nvenc not found)"
+        print(f"Video encoder: {tag}")
+    return _nvenc_available
+
+def _venc_args() -> list[str]:
+    if _nvenc():
+        return ["-c:v", "h264_nvenc", "-cq", "18", "-preset", "p4", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -80,6 +102,13 @@ def _find_video(raw_dir: Path, ep_id: str) -> Path | None:
     return None
 
 
+def _fmt(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    return f"{m}m{s:02d}s"
+
+
 def _safe_name(s: str) -> str:
     return "".join(c if c.isalnum() or c in " -_" else "_" for c in s).strip()[:35]
 
@@ -97,7 +126,7 @@ def _extract_segment(video: Path, start: str, end: str, out: Path) -> bool:
         "ffmpeg", "-i", str(video),
         "-ss", _srt_to_ffmpeg(start),
         "-to", _srt_to_ffmpeg(end),
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
+        *_venc_args(),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         "-y", str(out),
@@ -116,7 +145,7 @@ def _burn_subtitles(video: Path, srt: Path, out: Path) -> bool:
     ok, stderr = _run([
         "ffmpeg", "-i", str(video),
         "-vf", f"subtitles={srt.name}:force_style='{_SUBTITLE_STYLE}'",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
+        *_venc_args(),
         "-c:a", "copy",
         "-movflags", "+faststart",
         "-y", str(out),
@@ -179,6 +208,7 @@ def _process_zh_clip(
         print(f"[{cid_str}] {title}  — already exists, skipping")
         return True
 
+    t_clip_start = time.perf_counter()
     print(f"[{cid_str}] {title}")
     print(f"     {len(segments)} segments  |  ~{est_sec}s  |  cliffhanger → {cliff}")
 
@@ -201,23 +231,28 @@ def _process_zh_clip(
 
         note_str = f"  ({note})" if note else ""
         print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}")
+        t_seg_start = time.perf_counter()
 
         # ── Step 1: extract raw segment ───────────────────────────────────
         raw_seg = tmp / f"c{cid_str}_s{j:02d}_raw.mp4"
+        t0 = time.perf_counter()
         if not _extract_segment(video, start, end, raw_seg):
             print(f"     seg {j}: extraction failed — skipped")
             continue
+        print(f"          extract    {_fmt(time.perf_counter() - t0)}")
 
-        # ── Step 2: LaMa subtitle erasure ────────────────────────────────
+        # ── Step 2: subtitle erasure ──────────────────────────────────────
         clean_seg = tmp / f"c{cid_str}_s{j:02d}_clean.mp4"
-        print(f"          erasing subtitles...")
+        t0 = time.perf_counter()
         erasure_ok = eraser.process_video(raw_seg, clean_seg)
-        if not erasure_ok:
-            print(f"     seg {j}: erasure failed — using raw (original subtitles kept)")
-            clean_seg = raw_seg   # fallback: keep original
+        erase_elapsed = time.perf_counter() - t0
+        if erasure_ok:
+            print(f"          erase      {_fmt(erase_elapsed)}  ({dur/erase_elapsed:.1f}× realtime)")
+        else:
+            print(f"          erase      FAILED ({_fmt(erase_elapsed)}) — keeping original")
+            clean_seg = raw_seg
 
         # ── Step 3: clip English SRT for this segment ─────────────────────
-        # Translation output: translations/en/ep{id}_en.srt
         srt_candidates = [
             en_srt_dir / f"{ep_id}_en.srt",
             en_srt_dir / f"ep{ep_id}_en.srt",
@@ -239,17 +274,21 @@ def _process_zh_clip(
             tmp_srt = tmp / f"c{cid_str}_s{j:02d}.srt"
             tmp_srt.write_text(srt_content, encoding="utf-8")
             n_entries = srt_content.count("\n\n") + 1
-            print(f"          burning {n_entries} EN subtitle entries...")
+            t0 = time.perf_counter()
             if not _burn_subtitles(clean_seg, tmp_srt, final_seg):
-                print(f"     seg {j}: burn failed — using clean video (no subtitles)")
+                print(f"          burn       FAILED — using clean video")
                 shutil.copy2(clean_seg, final_seg)
+            else:
+                print(f"          burn       {_fmt(time.perf_counter() - t0)}  ({n_entries} entries)")
         else:
             if srt_src is None:
-                print(f"          EN SRT not found for ep{ep_id} — no subtitles")
+                print(f"          burn       skipped (EN SRT not found for ep{ep_id})")
             else:
-                print(f"          no EN subtitle entries in [{start}→{end}]")
+                print(f"          burn       skipped (no entries in [{start}→{end}])")
             shutil.copy2(clean_seg, final_seg)
 
+        seg_elapsed = time.perf_counter() - t_seg_start
+        print(f"          seg total  {_fmt(seg_elapsed)}")
         final_segs.append(final_seg)
         cumulative_offset += dur
 
@@ -258,6 +297,7 @@ def _process_zh_clip(
         return False
 
     # ── Concatenate all processed segments ────────────────────────────────
+    t0 = time.perf_counter()
     print(f"     Concatenating {len(final_segs)} segments → {out_name}")
     if len(final_segs) == 1:
         shutil.copy2(final_segs[0], out_path)
@@ -265,13 +305,16 @@ def _process_zh_clip(
     else:
         ok = _concat(final_segs, out_path)
 
+    clip_elapsed = time.perf_counter() - t_clip_start
     if ok:
         size_mb = out_path.stat().st_size / (1024 * 1024)
-        print(f"     OK  {out_name}  ({size_mb:.1f} MB  |  ~{cumulative_offset:.0f}s)")
+        concat_elapsed = time.perf_counter() - t0
+        print(f"     OK  {out_name}  ({size_mb:.1f} MB  |  ~{cumulative_offset:.0f}s content  |  concat {_fmt(concat_elapsed)})")
+        print(f"     clip total: {_fmt(clip_elapsed)}")
         if cliff_reason:
             print(f"     Hook: {cliff_reason}")
     else:
-        print("     ERROR: concat failed")
+        print(f"     ERROR: concat failed  ({_fmt(clip_elapsed)} elapsed)")
     print()
     return ok
 
@@ -330,11 +373,12 @@ def main(drama_name: str, filter_ids: set[int] | None) -> int:
     print(f"Output : {out_dir}")
     print()
 
-    # Load LaMa + PaddleOCR once — reused across all clips
+    # Subtitle eraser: delogo backend (pure FFmpeg, no per-frame OCR)
     from src.creative.subtitle_eraser import SubtitleEraser
-    eraser = SubtitleEraser(roi=roi, use_gpu=True, ocr_lang="ch")
+    eraser = SubtitleEraser(roi=roi, backend="delogo")
 
     errors: list[str] = []
+    t_total = time.perf_counter()
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         for plan in plans:
@@ -344,8 +388,10 @@ def main(drama_name: str, filter_ids: set[int] | None) -> int:
             if not ok:
                 errors.append(f"clip {plan.get('clip_id', '?')}: processing failed")
 
+    total_elapsed = time.perf_counter() - t_total
     ok_count = len(plans) - len(errors)
-    print(f"Done: {ok_count}/{len(plans)} clips processed in {out_dir}")
+    print(f"Done: {ok_count}/{len(plans)} clips  |  total {_fmt(total_elapsed)}")
+    print(f"Output: {out_dir}")
     if errors:
         print("Failures:")
         for e in errors:
