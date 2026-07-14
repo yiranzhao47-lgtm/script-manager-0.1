@@ -188,17 +188,23 @@ class TranslationMatrix:
             return
 
         if self._source_language == "en":
-            logger.warning(
-                "TranslationMatrix: [SKIP] %d episode(s) — source_language='en', "
-                "content is already English; ZH→EN translation not applicable. "
-                "0 LLM calls made, ¥0.00 cost for this stage.",
-                len(episode_ids),
+            if not self._target_langs:
+                logger.info(
+                    "TranslationMatrix: source_language='en' and no minor languages "
+                    "configured — skipping"
+                )
+                return
+            logger.info(
+                "TranslationMatrix: source_language='en' — skipping ZH→EN, "
+                "running minor-language translation only: %s",
+                self._target_langs,
             )
-            return
-
-        # Ensure Western-style names are assigned before any translation
-        self._ensure_name_override()
-        self._char_map = self._build_char_map()
+            # No name localization needed for EN source; char_map stays empty
+            self._char_map = {}
+        else:
+            # Ensure Western-style names are assigned before any translation
+            self._ensure_name_override()
+            self._char_map = self._build_char_map()
 
         n = len(episode_ids)
         logger.info(
@@ -264,19 +270,30 @@ class TranslationMatrix:
             logger.warning("[%s] No aligned segments — translation skipped", ep_id)
             return False
 
-        logger.info(
-            "Translating [%s] — %d segment(s)  languages=%s",
-            ep_id, len(segs), ["en"] + self._target_langs,
-        )
+        if self._source_language == "en":
+            # Source is already English — skip ZH→EN (Step 1) and Claude refine (Step 2A).
+            # Use the EN text directly as skeleton; only run minor-lang translation.
+            logger.info(
+                "Translating [%s] — %d segment(s)  minor-langs=%s  (EN source, no ZH→EN)",
+                ep_id, len(segs), self._target_langs,
+            )
+            skeleton   = [s["source_zh"] for s in segs]   # "source_zh" holds the EN text
+            en_refined = skeleton
+            lang_results = self._step2b_only(skeleton, segs, ep_id)
+        else:
+            logger.info(
+                "Translating [%s] — %d segment(s)  languages=%s",
+                ep_id, len(segs), ["en"] + self._target_langs,
+            )
 
-        # Step 1 — ZH → EN skeleton (DeepSeek)
-        skeleton = self._step1_skeleton(segs, ep_id)
-        # Fix continuation capitalization before Claude sees the skeleton,
-        # so it gets correct cues (no spurious period, lowercase continuation).
-        skeleton = self._fix_continuation_capitalization(skeleton, segs)
+            # Step 1 — ZH → EN skeleton (DeepSeek)
+            skeleton = self._step1_skeleton(segs, ep_id)
+            # Fix continuation capitalization before Claude sees the skeleton,
+            # so it gets correct cues (no spurious period, lowercase continuation).
+            skeleton = self._fix_continuation_capitalization(skeleton, segs)
 
-        # Step 2 — EN refine (Claude) + minor langs (DeepSeek), concurrent
-        en_refined, lang_results = self._step2_parallel(skeleton, segs, ep_id)
+            # Step 2 — EN refine (Claude) + minor langs (DeepSeek), concurrent
+            en_refined, lang_results = self._step2_parallel(skeleton, segs, ep_id)
 
         # Assemble, validate, cache, emit
         cache_data = self._assemble_cache(ep_id, segs, skeleton, en_refined, lang_results)
@@ -393,6 +410,33 @@ class TranslationMatrix:
 
         en_refined = lang_results.pop("en", list(skeleton))
         return en_refined, lang_results
+
+    def _step2b_only(
+        self,
+        skeleton: list[str],
+        segs: list[dict],
+        ep_id: str,
+    ) -> dict[str, list[str]]:
+        """Minor-language translation only — used when source_language='en'."""
+        input_arr = [{"idx": i, "text": text} for i, text in enumerate(skeleton)]
+        lang_results: dict[str, list[str]] = {}
+
+        with ThreadPoolExecutor(max_workers=max(1, len(self._target_langs))) as executor:
+            futures = {
+                lang: executor.submit(self._step2b_minor_lang, input_arr, ep_id, lang)
+                for lang in self._target_langs
+            }
+            for lang, future in futures.items():
+                try:
+                    lang_results[lang] = future.result()
+                except Exception as exc:
+                    logger.error(
+                        "[%s][%s] minor lang failed: %s — filling with skeleton",
+                        ep_id, lang, exc,
+                    )
+                    lang_results[lang] = list(skeleton)
+
+        return lang_results
 
     def _step2a_refine_en(self, input_arr: list[dict], ep_id: str) -> list[str]:
         """Track A: English polish via Claude."""
