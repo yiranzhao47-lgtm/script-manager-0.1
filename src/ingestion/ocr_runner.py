@@ -367,8 +367,8 @@ class OCRRunner:
         )
         return frames
 
-    @staticmethod
     def _ocr_one_frame(
+        self,
         ocr_engine: Any,
         frame_time: float,
         roi_crop: np.ndarray,
