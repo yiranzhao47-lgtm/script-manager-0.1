@@ -213,9 +213,16 @@ class SubtitleEraser:
 
         roi_y0 = int(h * self._roi[0])
         roi_y1 = int(h * self._roi[1])
-        roi_h  = roi_y1 - roi_y0
 
-        delogo = f"delogo=x=0:y={roi_y0}:w={w}:h={roi_h}:show=0"
+        # FFmpeg 8 bug: x=0 is treated as "unset" (falsy default), and the
+        # right/bottom edges must be strictly inside the frame (< not <=).
+        # Fix: start x at 1, reduce w by 2 to keep x+w = w-1 < frame_width.
+        dl_x = 1
+        dl_w = w - 2
+        dl_y = roi_y0
+        dl_h = roi_y1 - roi_y0 - 1   # ensure y+h < frame_height
+
+        delogo = f"delogo=x={dl_x}:y={dl_y}:w={dl_w}:h={dl_h}:show=0"
         logger.info(
             "SubtitleEraser(delogo): %s  %dx%d@%.2ffps  ROI y=[%d:%d]  nvenc=%s",
             input_path.name, w, h, fps, roi_y0, roi_y1, self._check_nvenc(),
