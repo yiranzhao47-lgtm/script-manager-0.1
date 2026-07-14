@@ -7,8 +7,6 @@ LLM prompt templates and downstream code never branch on mode.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   same_lang  — ASR is Master, OCR is Context
-            exception: when source_language="en", OCR is Master
-            (burned-in English subtitles are authoritative; ASR is context)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   For every ASR segment:
 
@@ -163,7 +161,6 @@ class OverlapAligner:
 
     def __init__(self, cfg: dict) -> None:
         self._mode: str = cfg["pipeline"]["mode"]
-        self._source_language: str = cfg.get("pipeline", {}).get("source_language", "zh")
         self._asr_role: str = (
             "master"
             if self._mode == "same_lang"
@@ -273,10 +270,6 @@ class OverlapAligner:
                 "[%s] No OCR blocks — context_available will be False for all %d segments",
                 episode_id, len(asr_segs),
             )
-
-        # ── English same_lang: OCR-as-master (burned-in EN subtitles are authoritative) ──
-        if self._source_language == "en":
-            return self._align_ocr_rescue(episode_id, asr_segs, ocr_blocks, reason="en_primary")
 
         # ── Sparse-ASR rescue: flip to OCR-as-master when ASR barely transcribed ──
         # NOTE: checked before the empty-ASR guard so that episodes where ALL ASR
@@ -642,11 +635,7 @@ class OverlapAligner:
         return {
             "episode": episode_id,
             "mode": self._mode,
-            "asr_role": (
-                "context"
-                if self._mode == "same_lang" and self._source_language == "en"
-                else self._asr_role
-            ),
+            "asr_role": self._asr_role,
             "segment_count": n,
             "stats": {
                 "with_context": n_ctx,
