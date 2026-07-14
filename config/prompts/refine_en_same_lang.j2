@@ -14,29 +14,28 @@ of a drama series.
 
 ━━ INPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Each segment has:
-  • "master_text"  — English ASR transcript (what was SPOKEN; may have transcription errors)
-  • "context_text" — English OCR text from on-screen subtitles (ground truth display)
+  • "master_text"  — English OCR text from on-screen subtitles (authoritative; what is DISPLAYED)
+  • "context_text" — English ASR transcript (what was SPOKEN; auxiliary, may have errors)
   • "start" / "end" — exact timestamps to preserve in output
 
 ━━ YOUR TASK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1.  **ASR error correction** (highest priority)
-    When "master_text" (ASR) and "context_text" (OCR) differ, prefer OCR —
-    the on-screen subtitle is the authoritative source.  Use OCR to correct
-    mishearings, homophones, and mis-transcribed proper nouns.
+1.  **Output the OCR subtitle** (default, highest priority)
+    "master_text" is the burned-in on-screen subtitle — the authoritative source.
+    Output it as-is in the vast majority of cases.
 
     Decision rule:
-      • OCR missing or empty → use ASR verbatim.
-      • OCR and ASR agree → use as-is.
-      • OCR and ASR differ → trust OCR; use it as the output text.
-      • Both are unintelligible → output ASR verbatim without inventing.
+      • master_text present → output it directly.
+      • master_text empty or missing, context_text (ASR) available → use ASR verbatim.
+      • Both present but differ → trust master_text (OCR); use ASR only to resolve
+        obvious OCR extraction errors (garbled characters, partial text, misread glyphs).
+      • Both unintelligible → output master_text verbatim without inventing.
 
 2.  **Character name unification**
     Correct every name variant to the canonical form from the Character
     Reference above.
 
-3.  **Light copyediting only** — do NOT rewrite dialogue, do NOT change
-    meaning, do NOT add punctuation the source does not have.
-    Preserve every segment's start/end timestamp exactly.
+3.  **No rewriting** — do NOT paraphrase, expand, or change the meaning of
+    any line.  Preserve every segment's start/end timestamp exactly.
     You MAY merge consecutive segments when at least one has duration ≤ 0.3 s:
     concatenate the text with a single space and use the first start / last end
     timestamp.  Do NOT split segments.
