@@ -341,6 +341,11 @@ class ShortDramaPipeline:
         # ── Stage 5: Drama Rhythm Analysis (optional) ─────────────────────
         self._phase_rhythm_analysis(episode_ids, meta)
 
+        # ── Stage 5.5: Translation — must precede creatives so EN SRTs exist
+        translation_cfg = self._cfg.get("intelligence", {}).get("translation", {})
+        if translation_cfg.get("enabled", False):
+            _run_translation_only(self._cfg)
+
         # ── Stage 6: Creatives (marketing clips) ──────────────────────────
         self._phase_creatives()
 
@@ -1189,11 +1194,6 @@ def _run_single(
 
     pipeline = ShortDramaPipeline(cfg)
     pipeline.run(video_dir=video_dir, skip_preflight=args.skip_preflight, yes=args.yes)
-
-    # ── Stage 6: Translation (auto-runs when intelligence.translation.enabled) ─
-    translation_cfg = cfg.get("intelligence", {}).get("translation", {})
-    if translation_cfg.get("enabled", False):
-        _run_translation_only(cfg)
 
 
 def main() -> None:
