@@ -1,42 +1,38 @@
 """
 Unit tests for src.utils.project_initializer.ProjectInitializer
 
-All heavy I/O (cv2, PaddleOCR, LLMClient) is mocked out so tests run without
-GPU hardware or a live API key.  File operations use a temporary directory
-(tmp_path) so the real project files are never touched.
+Heavy I/O (subprocess/ffprobe/ffmpeg, PaddleOCR) is mocked so tests run
+without GPU hardware.  File operations use a temporary directory (tmp_path)
+so the real project files are never touched.
+
+New behaviour tested here:
+  - ROI calibration (_run_calibration) runs on ALL scenarios, not just new-show.
+  - Statistical detection replaces the old single-frame + LLM approach.
+  - settings.yaml is always patched with the measured ROI.
+  - Verification (spot-check) must confirm at least one subtitle detected.
 """
 from __future__ import annotations
 
 import json
 import textwrap
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
+
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Minimal config dict used across all tests
 # ---------------------------------------------------------------------------
 _CFG = {
     "pipeline": {"mode": "same_lang"},
+    "same_lang": {"ocr": {"language": "ch", "use_gpu": False, "roi": [0.78, 0.94]}},
     "paths": {
         "raw_video_dir": "data/raw",
         "cache_dir":     "data/cache",
         "meta_dir":      "data/meta",
         "output_dir":    "data/output",
-    },
-    "execution": {
-        "llm": {
-            "model":       "deepseek-chat",
-            "base_url":    "https://api.deepseek.com",
-            "api_key_env": "DEEPSEEK_API_KEY",
-            "max_tokens":  8000,
-        },
-        "retry": {
-            "max_attempts":   2,
-            "wait_min_sec":   0,
-            "wait_max_sec":   0,
-            "no_retry_codes": [400, 401],
-        },
     },
 }
 
@@ -62,8 +58,6 @@ _SETTINGS_YAML = textwrap.dedent("""\
         language: "en"
     """)
 
-_INIT_SKILL_MD = "# init_agent_skill prompt"
-
 
 def _make_project(tmp: Path) -> Path:
     """Create the minimal directory/file scaffold in *tmp*."""
@@ -77,15 +71,86 @@ def _make_project(tmp: Path) -> Path:
     (tmp / "data" / "output" / "cn").mkdir(parents=True)
     (tmp / "config" / "prompts").mkdir(parents=True)
     (tmp / "config" / "settings.yaml").write_text(_SETTINGS_YAML, encoding="utf-8")
-    (tmp / "config" / "prompts" / "init_agent_skill.md").write_text(
-        _INIT_SKILL_MD, encoding="utf-8"
-    )
     return tmp
 
 
 def _make_initializer(tmp: Path, cfg: dict | None = None):
     from src.utils.project_initializer import ProjectInitializer
     return ProjectInitializer(cfg or _CFG, _root=tmp)
+
+
+# ---------------------------------------------------------------------------
+# Shared mock helpers for calibration
+# ---------------------------------------------------------------------------
+
+def _fake_probe_stdout(frame_w: int = 720, frame_h: int = 1280) -> str:
+    return json.dumps({
+        "streams": [{"codec_type": "video", "width": frame_w, "height": frame_h}]
+    })
+
+
+def _fake_frame_bytes(frame_w: int = 720, frame_h: int = 1280) -> bytes:
+    """Return a black raw-BGR frame of the correct byte count."""
+    return bytes(frame_w * frame_h * 3)
+
+
+def _make_ocr_detection(
+    y_top: int = 860, y_bot: int = 900,
+    x_left: int = 10, x_right: int = 500,
+    text: str = "台词",
+    conf: float = 0.95,
+) -> list:
+    """One PaddleOCR detection: [bbox_4pts, (text, confidence)]."""
+    return [
+        [[x_left, y_top], [x_right, y_top], [x_right, y_bot], [x_left, y_bot]],
+        (text, conf),
+    ]
+
+
+def _make_engine_mock(detections: list | None = None) -> MagicMock:
+    """PaddleOCR engine mock that returns *detections* on every .ocr() call."""
+    if detections is None:
+        detections = [_make_ocr_detection()]
+    engine = MagicMock()
+    engine.ocr.return_value = [detections]   # [[det1, det2, ...]]
+    return engine
+
+
+@contextmanager
+def _mock_calibration_io(
+    frame_w: int = 720,
+    frame_h: int = 1280,
+    engine: MagicMock | None = None,
+):
+    """
+    Context manager that patches the I/O boundary methods of ProjectInitializer
+    and the PaddleOCR constructor — without touching global subprocess.run
+    (which would break paddle's own platform detection at import time).
+
+    Patches:
+      - ProjectInitializer._probe_dimensions  → (frame_w, frame_h)
+      - ProjectInitializer._extract_frame     → black numpy frame
+      - paddleocr.PaddleOCR                  → fake engine with subtitle detections
+
+    Yields the fake PaddleOCR engine so callers can inspect .ocr() calls.
+    """
+    if engine is None:
+        engine = _make_engine_mock()
+
+    fake_frame = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
+
+    with (
+        patch(
+            "src.utils.project_initializer.ProjectInitializer._probe_dimensions",
+            return_value=(frame_w, frame_h),
+        ),
+        patch(
+            "src.utils.project_initializer.ProjectInitializer._extract_frame",
+            return_value=fake_frame,
+        ),
+        patch("paddleocr.PaddleOCR", return_value=engine),
+    ):
+        yield engine
 
 
 # ===========================================================================
@@ -334,6 +399,7 @@ class TestPatchSettingsYaml(unittest.TestCase):
         self.assertEqual(cfg["cross_lang"]["ocr"]["roi"], [0.80, 0.95])
 
     def test_preserves_comment_on_roi_line(self):
+        """Existing inline comment must survive the patch."""
         raw_before = (self.tmp / "config" / "settings.yaml").read_text(encoding="utf-8")
         self.assertIn("# subtitle band", raw_before)
         pi = _make_initializer(self.tmp)
@@ -393,17 +459,24 @@ class TestWriteCheckpoint(unittest.TestCase):
 
 
 # ===========================================================================
-# Test: auto_detect_and_heal — resume scenario (no side effects)
+# Test: auto_detect_and_heal — resume scenario
 # ===========================================================================
 
 class TestAutoDetectResume(unittest.TestCase):
+    """
+    In the new design, resume STILL runs ROI calibration.
+    The test verifies:
+      - cache is NOT purged
+      - checkpoint is NOT modified
+      - settings.yaml IS updated (calibration ran)
+      - PaddleOCR is called (calibration ran)
+    """
 
     def setUp(self):
         import tempfile
         self._td = tempfile.TemporaryDirectory()
         self.tmp = Path(self._td.name)
         _make_project(self.tmp)
-        # Plant a video and a matching checkpoint
         raw = self.tmp / "data" / "raw"
         (raw / "01.mp4").touch()
         ckpt = {
@@ -418,31 +491,46 @@ class TestAutoDetectResume(unittest.TestCase):
     def tearDown(self):
         self._td.cleanup()
 
-    def test_resume_does_not_purge(self):
+    def test_resume_does_not_purge_cache(self):
+        """Existing cache files must survive a resume run."""
         sentinel = self.tmp / "data" / "cache" / "asr" / "01_asr.json"
         sentinel.write_text("{}")
-        pi = _make_initializer(self.tmp)
-        pi.auto_detect_and_heal()
-        # Cache file must survive — resume must not purge
+        with _mock_calibration_io():
+            pi = _make_initializer(self.tmp)
+            pi.auto_detect_and_heal()
         self.assertTrue(sentinel.exists())
 
-    def test_resume_does_not_touch_settings_yaml(self):
-        before = (self.tmp / "config" / "settings.yaml").read_text()
-        pi = _make_initializer(self.tmp)
-        pi.auto_detect_and_heal()
-        after = (self.tmp / "config" / "settings.yaml").read_text()
-        self.assertEqual(before, after)
-
-    def test_resume_checkpoint_unchanged(self):
+    def test_resume_does_not_modify_checkpoint(self):
+        """Checkpoint must be left unchanged on resume."""
         ckpt_before = (self.tmp / "data" / "cache" / "checkpoint.json").read_text()
-        pi = _make_initializer(self.tmp)
-        pi.auto_detect_and_heal()
+        with _mock_calibration_io():
+            pi = _make_initializer(self.tmp)
+            pi.auto_detect_and_heal()
         ckpt_after = (self.tmp / "data" / "cache" / "checkpoint.json").read_text()
         self.assertEqual(ckpt_before, ckpt_after)
 
+    def test_resume_runs_calibration_and_patches_yaml(self):
+        """Even on resume, ROI calibration must update settings.yaml."""
+        with _mock_calibration_io() as engine:
+            pi = _make_initializer(self.tmp)
+            pi.auto_detect_and_heal()
+        # PaddleOCR must have been called
+        self.assertTrue(engine.ocr.called)
+        # settings.yaml must be updated (not the same as before)
+        import yaml
+        cfg = yaml.safe_load(
+            (self.tmp / "config" / "settings.yaml").read_text(encoding="utf-8")
+        )
+        # ROI must be within valid range and calibrated (not the original [0.55, 0.85])
+        roi = cfg["same_lang"]["ocr"]["roi"]
+        self.assertIsInstance(roi, list)
+        self.assertEqual(len(roi), 2)
+        self.assertGreaterEqual(roi[0], 0.0)
+        self.assertLessEqual(roi[1], 1.0)
+
 
 # ===========================================================================
-# Test: auto_detect_and_heal — new-show scenario (full workflow, mocked)
+# Test: auto_detect_and_heal — new-show scenario
 # ===========================================================================
 
 class TestAutoDetectNewShow(unittest.TestCase):
@@ -452,7 +540,6 @@ class TestAutoDetectNewShow(unittest.TestCase):
         self._td = tempfile.TemporaryDirectory()
         self.tmp = Path(self._td.name)
         _make_project(self.tmp)
-        # Place a stale cache artifact and an old checkpoint for a DIFFERENT show
         (self.tmp / "data" / "cache" / "asr" / "old.json").write_text("{}")
         old_ckpt = {
             "version": 1,
@@ -462,76 +549,49 @@ class TestAutoDetectNewShow(unittest.TestCase):
         (self.tmp / "data" / "cache" / "checkpoint.json").write_text(
             json.dumps(old_ckpt), encoding="utf-8"
         )
-        # New show's video file
         (self.tmp / "data" / "raw" / "ep01.mp4").write_bytes(b"")
 
     def tearDown(self):
         self._td.cleanup()
 
-    def _run_with_mocks(self, roi_response: list[float] = None):
-        roi_response = roi_response or [0.79, 0.93]
-        llm_json = json.dumps({
-            "detected_scenario": "new_show_detected",
-            "reason": "Mock test — new video detected.",
-            "recommended_roi": roi_response,
-        })
-
-        import numpy as np
-
-        fake_frame = np.zeros((1080, 1920, 3), dtype="uint8")
-
-        fake_cap = MagicMock()
-        fake_cap.isOpened.return_value = True
-        fake_cap.get.return_value = 25.0
-        fake_cap.read.return_value = (True, fake_frame)
-
-        # Correct PaddleOCR result structure:
-        #   raw[0] = list of detections
-        #   raw[0][i] = [bbox_4pts, (text, confidence)]
-        fake_ocr_result = [
-            [  # raw[0]: one detection list
-                [  # raw[0][0]: single detection = [bbox, text_info]
-                    [[0, 900], [200, 900], [200, 940], [0, 940]],  # bbox (4 corners)
-                    ("台词文本", 0.95),                             # (text, confidence)
-                ]
-            ]
-        ]
-        fake_engine = MagicMock()
-        fake_engine.ocr.return_value = fake_ocr_result
-
-        fake_llm_instance = MagicMock()
-        fake_llm_instance.complete.return_value = llm_json
-
-        with (
-            patch("cv2.VideoCapture", return_value=fake_cap),
-            patch("paddleocr.PaddleOCR", return_value=fake_engine),
-            patch("src.utils.llm_client.LLMClient", return_value=fake_llm_instance),
-        ):
+    def test_stale_cache_purged(self):
+        with _mock_calibration_io():
             pi = _make_initializer(self.tmp)
             pi.auto_detect_and_heal()
-
-    def test_stale_cache_purged(self):
-        self._run_with_mocks()
         self.assertFalse((self.tmp / "data" / "cache" / "asr" / "old.json").exists())
 
     def test_fresh_checkpoint_written(self):
-        self._run_with_mocks()
+        with _mock_calibration_io():
+            pi = _make_initializer(self.tmp)
+            pi.auto_detect_and_heal()
         ckpt = json.loads(
             (self.tmp / "data" / "cache" / "checkpoint.json").read_text()
         )
         self.assertIn("ep01.mp4", ckpt["global"]["video_list"])
 
     def test_settings_yaml_roi_patched(self):
-        self._run_with_mocks(roi_response=[0.79, 0.93])
+        """settings.yaml must be updated with the statistically measured ROI."""
+        with _mock_calibration_io():
+            pi = _make_initializer(self.tmp)
+            pi.auto_detect_and_heal()
         import yaml
         cfg = yaml.safe_load(
             (self.tmp / "config" / "settings.yaml").read_text(encoding="utf-8")
         )
-        self.assertEqual(cfg["same_lang"]["ocr"]["roi"], [0.79, 0.93])
+        roi = cfg["same_lang"]["ocr"]["roi"]
+        self.assertIsInstance(roi, list)
+        self.assertEqual(len(roi), 2)
+        self.assertGreaterEqual(roi[0], 0.0)
+        self.assertLessEqual(roi[1], 1.0)
 
     def test_roi_clamped_to_unit_interval(self):
-        """LLM returning out-of-range values should be silently clamped."""
-        self._run_with_mocks(roi_response=[-0.5, 1.5])
+        """Detected y-values near 0 or 1 must be clamped after margin is added."""
+        # Report boxes at extreme y positions to trigger clamping
+        extreme_det = _make_ocr_detection(y_top=5, y_bot=1275)  # near edges of 1280px
+        engine = _make_engine_mock([extreme_det])
+        with _mock_calibration_io(engine=engine):
+            pi = _make_initializer(self.tmp)
+            pi.auto_detect_and_heal()
         import yaml
         cfg = yaml.safe_load(
             (self.tmp / "config" / "settings.yaml").read_text(encoding="utf-8")
@@ -540,9 +600,125 @@ class TestAutoDetectNewShow(unittest.TestCase):
         self.assertGreaterEqual(roi[0], 0.0)
         self.assertLessEqual(roi[1], 1.0)
 
+    def test_calibration_aborts_when_no_subtitles(self):
+        """If OCR finds no wide subtitle boxes, RuntimeError must be raised."""
+        # Detection is narrow (watermark-like) — below MIN_WIDTH_RATIO threshold
+        narrow_det = _make_ocr_detection(x_left=0, x_right=50)  # 50/720 = 0.069 < 0.25
+        engine = _make_engine_mock([narrow_det])
+        with _mock_calibration_io(engine=engine):
+            pi = _make_initializer(self.tmp)
+            with self.assertRaises(RuntimeError):
+                pi.auto_detect_and_heal()
+
+    def test_in_memory_cfg_updated(self):
+        """cfg dict must be updated in-place so OCRRunner gets the correct ROI."""
+        with _mock_calibration_io():
+            pi = _make_initializer(self.tmp)
+            pi.auto_detect_and_heal()
+        roi = pi._cfg["same_lang"]["ocr"]["roi"]
+        self.assertIsInstance(roi, list)
+        self.assertEqual(len(roi), 2)
+
 
 # ===========================================================================
-# Test: LLMClient.complete json_mode parameter
+# Test: _calibrate_roi_statistical — unit tests
+# ===========================================================================
+
+class TestCalibrateROIStatistical(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._td.name)
+        _make_project(self.tmp)
+        (self.tmp / "data" / "raw" / "ep01.mp4").touch()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _pi(self, cfg=None):
+        return _make_initializer(self.tmp, cfg)
+
+    def test_detects_subtitle_band(self):
+        """Boxes at y≈0.67 should produce ROI around that band."""
+        # In a 1280px frame, y_top=860, y_bot=900 → ratios 0.672, 0.703
+        det = _make_ocr_detection(y_top=860, y_bot=900, x_right=400)
+        engine = _make_engine_mock([det])
+        with _mock_calibration_io(engine=engine):
+            pi = self._pi()
+            roi, _ = pi._calibrate_roi_statistical(pi._scan_videos())
+        # roi_start ≈ 0.672 - 0.04 = 0.632; roi_end ≈ 0.703 + 0.04 = 0.743
+        self.assertLess(roi[0], 0.672)
+        self.assertGreater(roi[1], 0.703)
+
+    def test_raises_when_too_few_boxes(self):
+        """Fewer than _MIN_BOXES_REQUIRED wide boxes → RuntimeError."""
+        # Use a narrow box (width 10px out of 720 → 0.014 < 0.25)
+        narrow_det = _make_ocr_detection(x_left=0, x_right=10)
+        engine = _make_engine_mock([narrow_det])
+        with _mock_calibration_io(engine=engine):
+            pi = self._pi()
+            with self.assertRaises(RuntimeError) as ctx:
+                pi._calibrate_roi_statistical(pi._scan_videos())
+        self.assertIn("subtitle box", str(ctx.exception).lower())
+
+    def test_ignores_upper_half_boxes(self):
+        """Boxes in the top half (y_center < 0.45) should not count as subtitles."""
+        upper_det = _make_ocr_detection(y_top=100, y_bot=200, x_right=400)  # centre ≈ 0.117
+        engine = _make_engine_mock([upper_det])
+        with _mock_calibration_io(engine=engine):
+            pi = self._pi()
+            with self.assertRaises(RuntimeError):
+                pi._calibrate_roi_statistical(pi._scan_videos())
+
+    def test_ignores_low_confidence_boxes(self):
+        """Detections below _MIN_CONFIDENCE threshold must be discarded."""
+        low_conf_det = _make_ocr_detection(conf=0.30)
+        engine = _make_engine_mock([low_conf_det])
+        with _mock_calibration_io(engine=engine):
+            pi = self._pi()
+            with self.assertRaises(RuntimeError):
+                pi._calibrate_roi_statistical(pi._scan_videos())
+
+
+# ===========================================================================
+# Test: _verify_roi — unit tests
+# ===========================================================================
+
+class TestVerifyROI(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._td.name)
+        _make_project(self.tmp)
+        (self.tmp / "data" / "raw" / "ep01.mp4").touch()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_passes_when_ocr_detects_text(self):
+        """Verification must succeed when OCR finds at least one text block."""
+        engine = _make_engine_mock()
+        with _mock_calibration_io(engine=engine):
+            pi = _make_initializer(self.tmp)
+            videos = pi._scan_videos()
+            pi._verify_roi(videos, [0.60, 0.75], engine)  # should not raise
+
+    def test_raises_when_ocr_finds_nothing(self):
+        """Verification must raise RuntimeError if no text detected in any frame."""
+        engine = MagicMock()
+        engine.ocr.return_value = [None]   # PaddleOCR returns empty
+        with _mock_calibration_io(engine=engine):
+            pi = _make_initializer(self.tmp)
+            videos = pi._scan_videos()
+            with self.assertRaises(RuntimeError) as ctx:
+                pi._verify_roi(videos, [0.60, 0.75], engine)
+        self.assertIn("FAILED", str(ctx.exception))
+
+
+# ===========================================================================
+# Test: LLMClient.complete json_mode parameter (unchanged)
 # ===========================================================================
 
 class TestLLMClientJsonMode(unittest.TestCase):

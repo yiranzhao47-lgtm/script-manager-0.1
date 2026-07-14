@@ -41,6 +41,7 @@ from pathlib import Path
 import yaml
 
 _ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
 
 # Hard-coded subtitle style matching user spec
 _SUBTITLE_STYLE = (
@@ -83,9 +84,10 @@ def _safe_name(s: str) -> str:
     return "".join(c if c.isalnum() or c in " -_" else "_" for c in s).strip()[:35]
 
 
-def _run(cmd: list[str]) -> tuple[bool, str]:
+def _run(cmd: list[str], cwd: str | None = None) -> tuple[bool, str]:
     r = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=cwd,
     )
     return r.returncode == 0, r.stderr
 
@@ -95,7 +97,7 @@ def _extract_segment(video: Path, start: str, end: str, out: Path) -> bool:
         "ffmpeg", "-i", str(video),
         "-ss", _srt_to_ffmpeg(start),
         "-to", _srt_to_ffmpeg(end),
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         "-y", str(out),
@@ -108,19 +110,17 @@ def _extract_segment(video: Path, start: str, end: str, out: Path) -> bool:
 
 def _burn_subtitles(video: Path, srt: Path, out: Path) -> bool:
     """Burn SRT into video with libass (hard subtitles)."""
-    # Windows: escape drive-letter colon for ffmpeg filter path (C: → C\:)
-    srt_posix = srt.as_posix()
-    if len(srt_posix) >= 2 and srt_posix[1] == ":":
-        srt_posix = srt_posix[0] + "\\:" + srt_posix[2:]
-
+    # Use only the filename (no drive letter) in the subtitles filter and set
+    # cwd so ffmpeg resolves it relative to the SRT directory.  This sidesteps
+    # the Windows drive-letter colon ambiguity in ffmpeg's filter option parser.
     ok, stderr = _run([
         "ffmpeg", "-i", str(video),
-        "-vf", f"subtitles={srt_posix}:force_style='{_SUBTITLE_STYLE}'",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-vf", f"subtitles={srt.name}:force_style='{_SUBTITLE_STYLE}'",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         "-movflags", "+faststart",
         "-y", str(out),
-    ])
+    ], cwd=str(srt.parent))
     if not ok:
         tail = stderr.strip().splitlines()
         print(f"         ffmpeg burn error: {tail[-1] if tail else '(empty)'}")
@@ -219,9 +219,11 @@ def _process_zh_clip(
         # ── Step 3: clip English SRT for this segment ─────────────────────
         # Translation output: translations/en/ep{id}_en.srt
         srt_candidates = [
+            en_srt_dir / f"{ep_id}_en.srt",
             en_srt_dir / f"ep{ep_id}_en.srt",
         ]
         try:
+            srt_candidates.append(en_srt_dir / f"{int(ep_id):02d}_en.srt")
             srt_candidates.append(en_srt_dir / f"ep{int(ep_id):02d}_en.srt")
         except ValueError:
             pass

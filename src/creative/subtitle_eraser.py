@@ -216,7 +216,7 @@ class SubtitleEraser:
                 "-i", "pipe:0",
                 "-i", str(input_path),
                 "-map", "0:v", "-map", "1:a?",
-                "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
                 "-c:a", "copy",
                 "-movflags", "+faststart",
                 str(output_path),
