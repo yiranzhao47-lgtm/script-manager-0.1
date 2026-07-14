@@ -1,6 +1,6 @@
 # cc_script_manager — 短剧字幕自动化流水线
 
-> **80集全量测试通过（胜爱情战争）** · **英文剧集支持（Dollar Baby 54集，¥0.45）** · **宝宝心思我知道（79集）翻译+素材完成** · 双轨多语言翻译矩阵（EN / FR / ES）· 付费墙战略报告 · Stage 6 广告素材自动生产（含悬念结尾精准剪切）· 检查点断点续传 · DeepSeek + Claude API 驱动
+> **80集全量测试通过（胜爱情战争）** · **英文剧集支持（Dollar Baby 54集，¥0.45）** · **宝宝心思我知道（79集）翻译+素材完成** · **Mecha Mechanic（135集）& The Riverside Chef S1（88集）运行中** · 双轨多语言翻译矩阵（EN / FR / ES）· 英文剧 FR/ES 并发翻译（`_step2b_only()`）· OCR FFmpeg 管道抽帧（~96% 帧减少）· 付费墙战略报告 · Stage 6 广告素材自动生产（含悬念结尾精准剪切）· 检查点断点续传 · DeepSeek + Claude API 驱动
 
 ---
 
@@ -108,7 +108,7 @@
 |------|---------|------|
 | 调度 | `pipeline.py` | CLI 入口、4 阶段串联、checkpoint 驱动、tqdm 进度 |
 | 摄取 | `asr_runner.py` | stable-whisper large-v3，逐集转录，GPU scope 保护；cache 写入 `asr_language` 语种指纹，加载时自动校验，语种变更强制重新转录 |
-| 摄取 | `ocr_runner.py` | PaddleOCR，动态 ROI，动态 FPS，逐帧缓存 JSON |
+| 摄取 | `ocr_runner.py` | PaddleOCR，动态 ROI，动态 FPS，逐帧缓存 JSON；FFmpeg 管道抽帧（仅解码目标帧），cv2 仅用于获取帧尺寸 |
 | 摄取 | `ocr_dedup.py` | 相似度合并帧序列 → 字幕时间段（cross_lang 专用） |
 | 对齐 | `overlap_aligner.py` | 双条件时间重叠打分，输出统一对齐 JSON；ASR 稀疏时自动升格 OCR 为 master；前导 OCR 救援补录 ASR 未覆盖的开头台词 |
 | 元数据 | `map_phase.py` | 20 集/批 Map LLM，抽取人物 + 别名 + 角色描述 |
@@ -146,9 +146,9 @@ pipeline:
 | 组件 | same_lang 行为 | cross_lang 行为 |
 |------|--------------|----------------|
 | ASRRunner | 主轨：中文音频 → 时间轴 | 语义锚：role=semantic_anchor |
-| OCRRunner | 从轨：中文字幕，fps=2，roi=[0.55,0.85] | 主轨：英文字幕，fps=5，roi=[0.80,0.95] |
+| OCRRunner | 从轨：中文字幕，fps=1，roi=[0.55,0.85] | 主轨：英文字幕，fps=5，roi=[0.80,0.95] |
 | OCRDedup | 不启用 | 启用：帧序列 → 字幕时间段 |
-| OverlapAligner | ASR 为 master，OCR 为 context | OCR 为 master，ASR 为 context |
+| OverlapAligner | ASR 为 master，OCR 为 context（所有 source_language 统一） | OCR 为 master，ASR 为 context |
 | Jinja2 模板 | `refine_same_lang.j2` / `refine_en_same_lang.j2` | `refine_cross_lang.j2` |
 | GPUManager | 允许 Whisper scope | asr.role==disabled 时拒绝 Whisper scope |
 
@@ -161,7 +161,7 @@ pipeline:
 | LangDetector | 期望 CJK 字符集 | 期望 Latin 字符集 |
 | EpisodeRefiner | 使用 `refine_same_lang.j2` | 使用 `refine_en_same_lang.j2` |
 | EpisodeRefiner 输出 | `data/output/<show>/cn/` | `data/output/<show>/en/` |
-| TranslationMatrix | 正常执行 ZH→EN 翻译 | **自动跳过**（内容已是英文） |
+| TranslationMatrix | 正常执行 ZH→EN 翻译 | 跳过 ZH→EN 和 Claude 润色；**仅运行 FR/ES `_step2b_only()`**（`target_languages` 为空时完全跳过） |
 | RhythmAnalyzer | 从 `<show>/cn/` 读 SRT | 从 `<show>/en/` 读 SRT |
 
 ### 1.3　统一数据契约：Master/Context 抽象
@@ -279,11 +279,34 @@ cropped = frame[y_start:y_end, :]                    # 仅 OCR 字幕带
 same_lang:
   ocr:
     roi: [0.55, 0.85]   # 竖屏短剧，字幕在画面 55-85% 高度区间
+    fps: 1              # ASR 为主轨时 1fps 足够；每秒解码 1 帧
 
 cross_lang:
   ocr:
     roi: [0.80, 0.95]   # 横屏译制片，字幕在画面 80-95% 高度区间
+    fps: 5              # OCR 为主轨时 5fps 保证切换捕获率
 ```
+
+**OCR 抽帧性能优化（2026-07-14）：**
+
+`_iter_frames()` 改为 **FFmpeg 管道**实现，取代原 cv2 逐帧顺序解码：
+
+```python
+# 旧实现：cv2 顺序 read()，每帧都必须解码
+cap.read()  # 每帧都解码，即使不是目标帧
+
+# 新实现：FFmpeg -vf fps=N 管道，只解码目标帧
+cmd = ["ffmpeg", "-i", str(video_path), "-vf", f"fps={target_fps}",
+       "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+```
+
+| 配置 | 原方案（cv2，2fps） | 新方案（FFmpeg，1fps） | 变化 |
+|------|------------------|---------------------|------|
+| 90s 片段 | ~2700帧读取 | ~90帧读取 | **−96.7%** |
+| 30fps 视频 | 每帧都解码 | 只解码目标帧 | FFmpeg 内部跳帧 |
+
+cv2 仍用于读取第一帧以获取视频尺寸（宽/高），不参与主循环。
 
 ### 防御 4　三重数据防御（集成测试验证）
 
@@ -602,6 +625,35 @@ python pipeline.py "dollar baby" --paywall-report
 | 元数据 | `data/meta/<drama_name>/`（含 meta.json，每剧独立）|
 | 输出 | `data/output/<drama_name>/` |
 
+### 3.2b　批量串行启动（scripts/launch.ps1）
+
+用于一次排队多部剧，每部剧在**独立 PowerShell 窗口**中运行，前一部 python 进程退出后自动开启下一部（严格串行，永不并行）。
+
+```powershell
+# 单部剧（带 --yes 跳过费用确认）
+.\scripts\launch.ps1 "My Fortune Angel Made Me a Queen" -Yes
+
+# 多部剧串行（三部按顺序自动执行）
+.\scripts\launch.ps1 "Drama A","Drama B","Drama C" -Yes
+
+# 仅跑翻译
+.\scripts\launch.ps1 "My Fortune Angel Made Me a Queen" -TranslateOnly
+
+# 注入 API Key（不写入任何文件）
+.\scripts\launch.ps1 "Drama A","Drama B" -Yes `
+    -DeepSeekKey "sk-xxx" -OpenRouterKey "sk-or-v1-xxx"
+```
+
+**关键设计：**
+
+| 机制 | 说明 |
+|------|------|
+| 每剧独立窗口 | `Start-Process powershell ... -Wait`：控制器阻塞，等待子进程退出后再启动下一部 |
+| 自动关闭 | 子脚本以 `exit $LASTEXITCODE` 结束，python 退出即窗口关闭，**无需人工操作** |
+| 进度显示 | `[1/3] Drama A` → `[2/3] Drama B`，终端实时可见 |
+| 单引号转义 | 剧名含 `'`（如"Magnate's Heart"）自动转义为 `''`，不引发 PS 解析错误 |
+| 无人值守安全 | 不使用 `-NoExit` 或 `Read-Host`，适合离开机器长期运行 |
+
 ### 3.3　Pre-flight 费用估算（DryRunGuard）
 
 启动时自动估算本次运行的 token 用量和 API 成本，打印预算表后再继续：
@@ -738,7 +790,7 @@ same_lang:                 # ③ 若 same_lang：
   ocr:
     language: "ch"         #    PaddleOCR 语言："ch" 中文 | "en" 英文
     roi: [0.55, 0.85]      #    调整字幕高度区间（目视视频确定字幕带位置）
-    fps: 2                 #    竖屏短剧 2fps 足够；快速场切可提高至 3
+    fps: 1                 #    ASR 为主轨，1fps 足够覆盖 ≥1s 字幕；快速场切可提高至 2
   alignment:
     asr_sparse_rescue: true  #  默认开启：BGM 盖过语音导致 ASR 稀疏时自动用 OCR 救援
     asr_min_segments: 10     #  低于此段数触发救援（通常不需要调整）
@@ -860,13 +912,13 @@ data/
 | LangDetector | 期望 Latin 字符集，英文视频正常通过预检 |
 | EpisodeRefiner | 使用 `refine_en_same_lang.j2`：OCR 优先于 ASR（OCR 为权威字幕源） |
 | 输出目录 | `data/output/<show>/en/`（替代 `cn/`） |
-| TranslationMatrix | **自动跳过**：内容已是英文，无需 ZH→EN 翻译 |
+| TranslationMatrix | 跳过 ZH→EN（内容已是英文）；直接用 EN 主字幕作骨架，并发运行 FR/ES DeepSeek 翻译（`_step2b_only()`）；`target_languages: []` 时完全跳过 |
 | 付费墙报告 | 正常运行（drama_structure_graph 为语言无关分析） |
 
 **Dollar Baby 54集实测（2026-07-09）：**
 - 54集 SRT 全部生成，OCR 覆盖率偏低（字幕 ROI 未能自动标定，ASR 为主轨）
 - 总 LLM 费用约 ¥0.45（DeepSeek）
-- 翻译阶段自动跳过（日志：`TranslationMatrix: source_language='en' — translation skipped`）
+- 翻译阶段：ZH→EN 跳过，FR/ES 通过 `_step2b_only()` 并发执行
 
 **注意：** ROI 自动推断依赖 API Key 在第一次运行时可用。若推断失败，使用 VLC 手动量取字幕带位置后直接填写 `same_lang.ocr.roi`。
 
@@ -1081,13 +1133,17 @@ pricing:
 ### 5.1　架构：三步双轨并发
 
 ```
-精修中文 SRT (data/output/<show_name>/cn/{ep}.srt)
-         │  （仅当 source_language="zh"；英文剧自动跳过整个 Stage 6）
+精修中文 SRT (data/output/<show_name>/cn/{ep}.srt)         ← source_language="zh"
+  或
+精修英文 SRT (data/output/<show_name>/en/{ep}.srt)         ← source_language="en"
          │
    Step 1 — DeepSeek   ZH → EN 骨架（faithful，保留所有剧情信息）
+         │  ★ source_language="en" 时跳过此步（EN 内容直接作骨架）
          │
          ├─ Track A (并发) — Claude    EN 骨架 → EN 润色（US English，移动端观感）
+         │  ★ source_language="en" 时跳过（内容已是英文，无需润色）
          └─ Track B (并发) — DeepSeek  EN 骨架 → fr / es / …（小语种，每种一线程）
+         │  ★ source_language="en" 时仍正常执行（_step2b_only()）
          │                             （默认配置：fr + es；在 settings.yaml target_languages 扩展）
          │
    Step 3 — 代码层校验
@@ -1336,7 +1392,7 @@ data/cache/<show_name>/translation/
   01_translation.json          ← 骨架 + 润色 + 小语种 完整翻译缓存
 ```
 
-> **自动跳过规则：** 当 `pipeline.source_language: "en"` 时，`TranslationMatrix.run_all()` 在入口处直接返回，不发任何 LLM 请求，不写任何翻译文件。
+> **source_language="en" 行为：** 跳过 Step 1（ZH→EN）和 Track A（Claude 润色）；直接取 EN 主字幕作骨架，并发执行 Track B（FR/ES 等小语种，`_step2b_only()`）。仅当 `target_languages: []`（空列表）时才完全跳过整个 Stage，不发任何 LLM 请求。
 
 > **安全规则：** `DEEPSEEK_API_KEY` 与 `OPENROUTER_API_KEY` 只存在于环境变量，绝不写入任何文件。
 
