@@ -4,7 +4,7 @@ Process marketing clips with subtitle erasure and English subtitle burning.
 For Chinese subtitle dramas (source_language="zh"):
   Each segment is processed through:
     1. ffmpeg extraction (frame-accurate, re-encoded)
-    2. LaMa subtitle erasure  (PaddleOCR detect + LaMa inpaint, ROI-only)
+    2. Subtitle erasure  (PaddleOCR detect + cv2.inpaint TELEA, ROI-only)
     3. English SRT window extraction + timestamp offset (srt_clipper)
     4. ffmpeg subtitle burn-in  (libass hard subtitles)
   Segments are then concatenated into the final creative via stream-copy.
