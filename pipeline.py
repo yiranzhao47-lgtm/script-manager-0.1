@@ -774,10 +774,10 @@ class ShortDramaPipeline:
 
         logger.info("▶ [6/6] Creatives — starting  drama=%s", drama_name)
 
-        from scripts.extract_clips  import main as _extract
-        from scripts.plan_clips     import main as _plan
-        from scripts.assemble_clips import main as _assemble
-        from scripts.write_copy     import main as _write_copy
+        from scripts.extract_clips     import main as _extract
+        from scripts.plan_clips        import main as _plan
+        from scripts.process_creatives import main as _assemble
+        from scripts.write_copy        import main as _write_copy
 
         # Step 1: extract anchor clips (idempotent ffmpeg, fast)
         logger.info("   [6/6] Step 1/3 — extracting anchor clips")
@@ -815,7 +815,7 @@ class ShortDramaPipeline:
             logger.info("   [6/6] Step 3/3 — assembling final marketing clips")
             rc = _assemble(drama_name, None)
             if rc != 0:
-                logger.error("   [6/6] assemble_clips failed (rc=%d)", rc)
+                logger.error("   [6/6] process_creatives failed (rc=%d)", rc)
                 return
 
         # Step 4: Meta ad copy (skip if CSV already exists)
