@@ -24,8 +24,8 @@ same_lang:
       min_avg_probability: 0.50       # segment avg_probability below this → flagged as hallucination_risk
       word_low_conf_threshold: 0.40   # per-word probability below this → word flagged as low_confidence
   ocr:
-    fps: 2                  # frames per second sampled for OCR
-    roi: [0.78, 0.94]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
+    fps: 1                  # frames per second sampled for OCR (ASR is master; 1 FPS covers any subtitle ≥1 s)
+    roi: [0.558, 0.814]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
     language: "ch"          # PaddleOCR language code — "ch" for Chinese, "en" for English
     use_gpu: true
     min_line_confidence: 0.50   # discard OCR text boxes with confidence below this value

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -88,12 +89,12 @@ def _iter_frames(
     """
     Yield (timestamp_sec, roi_cropped_bgr_frame) at approximately target_fps.
 
-    Uses sequential read — no random seeks, which is more efficient for most
-    video codecs (especially H.264/H.265 on spinning disk).
+    Uses FFmpeg pipe output so only the requested frames are decoded —
+    skipped frames are never decompressed, unlike the old cv2 sequential read.
 
     Args:
         video_path : Path to the episode video file.
-        target_fps : Desired sampling rate (e.g. 2 for same_lang, 5 for cross_lang).
+        target_fps : Desired sampling rate (e.g. 1 for same_lang, 5 for cross_lang).
         roi        : (y_start_ratio, y_end_ratio) as fractions of frame height.
 
     Yields:
@@ -103,51 +104,51 @@ def _iter_frames(
         import cv2
     except ImportError as exc:
         raise ImportError(
-            "opencv-python is required for frame extraction.\n"
+            "opencv-python is required for video metadata.\n"
             "  pip install opencv-python"
         ) from exc
 
+    # cv2 used only to read frame dimensions — no frame decode here
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise IOError(f"Cannot open video: {video_path}")
-
-    video_fps: float = cap.get(cv2.CAP_PROP_FPS)
-    total_frames: int = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_w: int = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_h: int = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
 
-    if video_fps <= 0 or frame_h <= 0:
-        cap.release()
-        raise ValueError(
-            f"Invalid video metadata (fps={video_fps}, h={frame_h}): {video_path}"
-        )
+    if frame_h <= 0 or frame_w <= 0:
+        raise ValueError(f"Invalid video metadata (w={frame_w}, h={frame_h}): {video_path}")
 
     y_start = int(frame_h * roi[0])
-    y_end = int(frame_h * roi[1])
-
-    # How many native video frames to skip per sample
-    frame_step: float = video_fps / target_fps
-    next_target: float = 0.0
-    current_idx: int = 0
+    y_end   = int(frame_h * roi[1])
+    frame_bytes = frame_w * frame_h * 3  # BGR24
 
     logger.debug(
-        "Frame extraction — %s  video_fps=%.2f  target_fps=%.1f  "
-        "total_frames=%d  roi=[%.0f%%,%.0f%%]",
-        video_path.name, video_fps, target_fps,
-        total_frames, roi[0] * 100, roi[1] * 100,
+        "Frame extraction — %s  target_fps=%.1f  roi=[%.0f%%,%.0f%%]  frame=%dx%d",
+        video_path.name, target_fps, roi[0] * 100, roi[1] * 100, frame_w, frame_h,
     )
 
+    cmd = [
+        "ffmpeg", "-i", str(video_path),
+        "-vf", f"fps={target_fps}",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "pipe:1",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    frame_idx = 0
     try:
-        while current_idx < total_frames:
-            ret, frame = cap.read()
-            if not ret:
+        while True:
+            raw = proc.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
                 break
-            if current_idx >= next_target:
-                timestamp = current_idx / video_fps
-                yield timestamp, frame[y_start:y_end, :]
-                next_target += frame_step
-            current_idx += 1
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((frame_h, frame_w, 3))
+            timestamp = frame_idx / target_fps
+            yield timestamp, frame[y_start:y_end, :]
+            frame_idx += 1
     finally:
-        cap.release()
+        proc.stdout.close()
+        proc.wait()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
