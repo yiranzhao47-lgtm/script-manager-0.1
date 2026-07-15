@@ -45,6 +45,14 @@ def _ts_to_sec(ts: str) -> float:
         return 0.0
 
 
+def _ep_norm(ep_id: str) -> str:
+    """Normalize episode ID for comparison: '02', '002', '2' → '2'."""
+    try:
+        return str(int(ep_id))
+    except (ValueError, TypeError):
+        return str(ep_id)
+
+
 def _build_scene_inventory(episode_conflicts: dict) -> str:
     """Compact scene inventory with explicit duration so LLM can sum correctly."""
     lines: list[str] = []
@@ -98,12 +106,23 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
     Extend plan in-place by appending scenes until total video duration ≥ target_sec.
 
     Three guards applied during extension:
-      • Protagonist unity (Fix 3): stop at episode boundaries where protagonist is absent.
+      • Protagonist unity (Fix 3): stop when protagonist is absent from a scene — both at
+        episode boundaries AND for intra-episode viewpoint/subplot changes.
       • No-spoiler cliffhanger (Fix 2): stop before a scene that answers previously open tension
         (pattern: prev scene had unresolved_debt → this scene has pivot_signals + no debt).
       • Hard ceiling: never exceed target_sec + 50s regardless of other checks.
     """
     protagonist: str = plan.get("protagonist_name", "").strip()
+    # Token-based name matching: scenes often use only the first name, not the full name.
+    # Build a set of significant tokens (≥3 chars) from the full protagonist_name.
+    protagonist_tokens: set[str] = {t.lower() for t in protagonist.split() if len(t) >= 3} if protagonist else set()
+
+    def _protagonist_present(sc_actions_str: str) -> bool:
+        if not protagonist_tokens:
+            return True
+        s = sc_actions_str.lower()
+        return any(tok in s for tok in protagonist_tokens)
+
     segments = plan.get("segments", [])
     if not segments:
         return
@@ -115,6 +134,7 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
     max_sec = target_sec + 50
 
     last_seg  = segments[-1]
+    last_ep   = last_seg.get("episode_id", "")  # episode of the LLM's last segment
     last_sids = last_seg.get("scene_ids", [])
     last_sid  = last_sids[-1] if last_sids else ""
 
@@ -190,12 +210,19 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
             break
 
         # ── Fix 3: protagonist unity guard ─────────────────────────────────
-        # At episode boundaries, stop if protagonist is absent in the new episode.
-        if protagonist and ep_id != pending_ep and pending_ep is not None:
-            if protagonist.lower() not in sc_actions.lower():
-                _flush_pending()
-                cliffhanger = sc_id
-                break
+        # Stop when protagonist is absent — covers episode boundaries AND
+        # intra-episode viewpoint/subplot changes.
+        # Exception: the very first scene of a BRAND-NEW episode (ep_id differs
+        # from last_ep, nothing in pending yet) is allowed through without a
+        # check so extension can at least start in the new episode.
+        # ep IDs are normalized (strip leading zeros) because the LLM may output
+        # "02" while drama_structure_graph uses "002".
+        _first_of_new_ep = (pending_ep is None and _ep_norm(ep_id) != _ep_norm(last_ep))
+        if protagonist_tokens and sc_actions and not _first_of_new_ep and not _protagonist_present(sc_actions):
+            if pending_ep is not None and ep_id != pending_ep:
+                _flush_pending()  # commit prior ep's scenes before stopping
+            cliffhanger = sc_id
+            break
 
         # ── Duration computation ────────────────────────────────────────────
         if ep_id == pending_ep:
@@ -448,8 +475,11 @@ _SUSPENSE_RE = re.compile(
     re.UNICODE,
 )
 
-# Lines that close/resolve — avoid ending here
-_DECLARATIVE_RE = re.compile(r"[。！!]\s*$", re.UNICODE)
+# Lines that close/resolve — avoid ending here.
+# ZH: all strong endings (！ and ! both signal declarative finality in Chinese copy).
+# EN: ASCII ! is protest/emotion and often the BEST suspense cue, so exclude it.
+_DECLARATIVE_RE_ZH = re.compile(r"[。！!]\s*$", re.UNICODE)
+_DECLARATIVE_RE_EN = re.compile(r"[。！]\s*$",  re.UNICODE)
 
 
 def _parse_srt(srt_path: Path) -> list[tuple[str, str, str]]:
@@ -466,7 +496,8 @@ def _find_suspense_cut(
     seg_start: str,
     seg_end: str,
     min_gap_sec: float = 2.0,
-    max_lookback_sec: float = 20.0,
+    max_lookback_sec: float = 45.0,
+    source_language: str = "zh",
 ) -> str | None:
     """
     Walk backward from seg_end within the segment window.
@@ -477,6 +508,8 @@ def _find_suspense_cut(
       2. Last line matching conditional/question patterns
       3. Last line that does NOT end with 。 or ！ (weak fallback)
     """
+    declarative_re = _DECLARATIVE_RE_ZH if source_language == "zh" else _DECLARATIVE_RE_EN
+
     start_sec = _ts_to_sec(seg_start)
     end_sec   = _ts_to_sec(seg_end)
 
@@ -500,7 +533,7 @@ def _find_suspense_cut(
         if _SUSPENSE_RE.search(text):
             best_suspense = end_ts
             break  # most recent suspense line — take it immediately
-        if best_weak is None and not _DECLARATIVE_RE.search(text):
+        if best_weak is None and not declarative_re.search(text):
             best_weak = end_ts
 
     return best_suspense or best_weak
@@ -511,6 +544,7 @@ def _apply_srt_suspense_cut(
     episode_conflicts: dict,
     srt_dir: Path,
     min_gap_sec: float = 2.0,
+    source_language: str = "zh",
 ) -> int:
     """
     Layer 4: For clips that Layer 3 did not handle (no hook_end_time in scene data),
@@ -567,6 +601,7 @@ def _apply_srt_suspense_cut(
             last_seg.get("start_time", ""),
             last_seg.get("end_time", ""),
             min_gap_sec=min_gap_sec,
+            source_language=source_language,
         )
         if better:
             last_seg["end_time"]        = better
@@ -664,7 +699,7 @@ def main(drama_name: str) -> int:
         logger.info("Applied hook_end_time cut to %d clip(s) from scene data.", n_hook)
 
     # Layer 4: SRT line-scan fallback for clips without hook_end_time
-    n_srt = _apply_srt_suspense_cut(plans, episode_conflicts, srt_dir)
+    n_srt = _apply_srt_suspense_cut(plans, episode_conflicts, srt_dir, source_language=source_language)
     if n_srt:
         logger.info("Applied SRT suspense cut to %d clip(s) via line scan.", n_srt)
 
