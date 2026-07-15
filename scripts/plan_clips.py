@@ -94,6 +94,47 @@ def _build_ordered_scenes(episode_conflicts: dict) -> list[dict]:
     return ordered
 
 
+def _build_protagonist_aliases(
+    protagonist_tokens: set[str],
+    episode_conflicts: dict,
+) -> set[str]:
+    """
+    Scan drama scenes for role-assignment patterns to extend the protagonist alias set.
+    Example: 'proclaims Lillian Blackwood as Luna Princess' → adds 'luna princess'.
+    Only processes scene actions that mention the protagonist by name token.
+    """
+    aliases: set[str] = set(protagonist_tokens)
+    if not protagonist_tokens:
+        return aliases
+
+    # "as [Title Phrase]" — picks up "proclaimed X as Luna Princess"
+    _as_role_re = re.compile(
+        r"\bas\s+(?:the\s+|a\s+|an\s+|his\s+|her\s+)?"
+        r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)",
+        re.UNICODE,
+    )
+    # "becomes [the/his/her] [Title Phrase]"
+    _becomes_re = re.compile(
+        r"\bbecomes?\s+(?:the\s+|a\s+|an\s+|his\s+|her\s+)?"
+        r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)",
+        re.UNICODE,
+    )
+
+    for ep_data in episode_conflicts.values():
+        for scene in ep_data.get("scenes", []):
+            for action in scene.get("scene_actions", []):
+                if not any(tok in action.lower() for tok in protagonist_tokens):
+                    continue
+                for pat in (_as_role_re, _becomes_re):
+                    for m in pat.finditer(action):
+                        phrase = m.group(1).strip().lower()
+                        words = phrase.split()
+                        if 2 <= len(words) <= 4:
+                            aliases.add(phrase)
+
+    return aliases
+
+
 def _plan_actual_sec(segments: list[dict]) -> float:
     return sum(
         max(0.0, _ts_to_sec(s.get("end_time", "")) - _ts_to_sec(s.get("start_time", "")))
@@ -101,7 +142,7 @@ def _plan_actual_sec(segments: list[dict]) -> float:
     )
 
 
-def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) -> None:
+def _extend_plan(plan: dict, ordered_scenes: list[dict], episode_conflicts: dict, target_sec: int = 165, bridge_skip_sec: float = 3.0) -> None:
     """
     Extend plan in-place by appending scenes until total video duration ≥ target_sec.
 
@@ -116,12 +157,13 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
     # Token-based name matching: scenes often use only the first name, not the full name.
     # Build a set of significant tokens (≥3 chars) from the full protagonist_name.
     protagonist_tokens: set[str] = {t.lower() for t in protagonist.split() if len(t) >= 3} if protagonist else set()
+    protagonist_aliases: set[str] = _build_protagonist_aliases(protagonist_tokens, episode_conflicts)
 
     def _protagonist_present(sc_actions_str: str) -> bool:
-        if not protagonist_tokens:
+        if not protagonist_aliases:
             return True
         s = sc_actions_str.lower()
-        return any(tok in s for tok in protagonist_tokens)
+        return any(alias in s for alias in protagonist_aliases)
 
     segments = plan.get("segments", [])
     if not segments:
@@ -225,6 +267,12 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
         # ep IDs are normalized (strip leading zeros) for LLM vs. graph format.
         _first_of_new_ep = (pending_ep is None and _ep_norm(ep_id) != _ep_norm(last_ep))
         if protagonist_tokens and sc_protagonist_ctx and not _first_of_new_ep and not _protagonist_present(sc_protagonist_ctx):
+            # Bridge-scene skip: very short scenes with no pivot are transition filler.
+            # Skip them so extension can continue into the next scene (which may reference
+            # the protagonist by role/title rather than name).
+            sc_dur = max(0.0, _ts_to_sec(sc_end) - _ts_to_sec(sc_start))
+            if pending_ep is not None and sc_dur <= bridge_skip_sec:
+                continue
             if pending_ep is not None and ep_id != pending_ep:
                 _flush_pending()  # commit prior ep's scenes before stopping
             cliffhanger = sc_id
@@ -289,7 +337,7 @@ def _extend_short_plans(plans: dict, episode_conflicts: dict, target_sec: int = 
 
         actual = _plan_actual_sec(plan.get("segments", []))
         if actual < target_sec:
-            _extend_plan(plan, ordered_scenes, target_sec)
+            _extend_plan(plan, ordered_scenes, episode_conflicts, target_sec)
             extended += 1
     return extended
 
