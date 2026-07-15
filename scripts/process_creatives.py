@@ -207,6 +207,21 @@ def _process_zh_clip(
     srt_blocks: list[str] = []
     cumulative_offset = 0.0
 
+    # Read freeze-tail config (imported lazily to avoid circular import)
+    from scripts.assemble_clips import _apply_freeze_tail, _get_duration, _sec_to_ffmpeg
+
+    cfg_path = _ROOT / "config" / "settings.yaml"
+    tail_freeze_sec = 2.5
+    tail_audio_fade_sec = 1.0
+    if cfg_path.exists():
+        try:
+            creatives_cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+            creatives_cfg = creatives_cfg.get("intelligence", {}).get("creatives", {})
+            tail_freeze_sec     = float(creatives_cfg.get("tail_freeze_sec",     tail_freeze_sec))
+            tail_audio_fade_sec = float(creatives_cfg.get("tail_audio_fade_sec", tail_audio_fade_sec))
+        except Exception:
+            pass
+
     for j, seg in enumerate(segments, 1):
         ep_id     = seg.get("episode_id", "")
         start     = seg.get("start_time", "")
@@ -222,14 +237,26 @@ def _process_zh_clip(
             continue
 
         note_str = f"  ({note})" if note else ""
-        print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}")
+
+        is_last = (j == len(segments))
+        has_cliffhanger_cut = seg.get("_cliffhanger_cut", False)
 
         # ── Extract segment (frame-accurate re-encode) ────────────────────
         raw_seg = tmp / f"c{cid_str}_s{j:02d}.mp4"
         t0 = time.perf_counter()
-        if not _extract_segment(video, start, end, raw_seg):
-            print(f"     seg {j}: extraction failed — skipped")
-            continue
+        if is_last and has_cliffhanger_cut and tail_freeze_sec > 0:
+            # Bake freeze tail into this segment: freeze video at cut point,
+            # audio continues (captures remaining speech) then fades.
+            from scripts.assemble_clips import _extract_segment_with_tail
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s freeze tail")
+            if not _extract_segment_with_tail(video, start, end, tail_freeze_sec, tail_audio_fade_sec, raw_seg):
+                print(f"     seg {j}: extraction failed — skipped")
+                continue
+        else:
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}")
+            if not _extract_segment(video, _srt_to_ffmpeg(start), _srt_to_ffmpeg(end), raw_seg):
+                print(f"     seg {j}: extraction failed — skipped")
+                continue
         print(f"          extract    {_fmt(time.perf_counter() - t0)}")
 
         # ── Clip EN SRT for this segment, offset to clip timeline ─────────
@@ -272,10 +299,15 @@ def _process_zh_clip(
         ok = _concat(raw_segs, out_path)
 
     clip_elapsed = time.perf_counter() - t_clip_start
+    tail_baked = segments[-1].get("_cliffhanger_cut", False) and tail_freeze_sec > 0
     if ok:
+        if tail_freeze_sec > 0 and not tail_baked:
+            print(f"     Applying freeze tail ({tail_freeze_sec:.1f}s, silence) …")
+            _apply_freeze_tail(out_path, tail_freeze_sec, tail_audio_fade_sec)
         size_mb = out_path.stat().st_size / (1024 * 1024)
         concat_elapsed = time.perf_counter() - t0
-        print(f"     OK  {out_path.name}  ({size_mb:.1f} MB  |  ~{cumulative_offset:.0f}s  |  concat {_fmt(concat_elapsed)})")
+        tail_note = f" + {tail_freeze_sec:.1f}s tail" if tail_freeze_sec > 0 else ""
+        print(f"     OK  {out_path.name}  ({size_mb:.1f} MB  |  ~{cumulative_offset:.0f}s{tail_note}  |  concat {_fmt(concat_elapsed)})")
 
         # ── Write companion SRT ───────────────────────────────────────────
         merged = _renumber_srt(srt_blocks)

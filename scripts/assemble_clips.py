@@ -41,6 +41,112 @@ def _ts_to_sec(ts: str) -> float:
         return 0.0
 
 
+def _sec_to_ffmpeg(s: float) -> str:
+    """Convert seconds to HH:MM:SS.mmm for ffmpeg -to / -ss."""
+    h = int(s // 3600)
+    m = int((s % 3600) // 60)
+    sec = s % 60
+    return f"{h:02d}:{m:02d}:{sec:06.3f}"
+
+
+def _get_duration(path: Path) -> float:
+    """Return video duration in seconds via ffprobe."""
+    r = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def _extract_segment_with_tail(
+    video: Path,
+    start: str,
+    end: str,
+    freeze_sec: float,
+    fade_sec: float,
+    out: Path,
+) -> bool:
+    """
+    Extract a segment and bake in a freeze-frame tail in a single FFmpeg pass.
+
+    Used for the last segment of a _cliffhanger_cut clip:
+      - Source is read from start to (end + freeze_sec) to capture remaining speech.
+      - Video is trimmed at the planned 'end' point then frozen for freeze_sec.
+      - Audio plays through the tail and fades to silence over the last fade_sec.
+    """
+    dur = _ts_to_sec(end) - _ts_to_sec(start)
+    total = dur + freeze_sec
+    fade_start = total - fade_sec
+    fc = (
+        f"[0:v]trim=end={dur:.3f},setpts=PTS-STARTPTS,"
+        f"tpad=stop_mode=clone:stop_duration={freeze_sec:.3f}[vout];"
+        f"[0:a]afade=t=out:st={fade_start:.3f}:d={fade_sec:.3f}[aout]"
+    )
+    ok, stderr = _run([
+        "ffmpeg", "-i", str(video),
+        "-ss", _srt_to_ffmpeg(start),
+        "-to", _sec_to_ffmpeg(_ts_to_sec(end) + freeze_sec),
+        "-filter_complex", fc,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        "-y", str(out),
+    ])
+    if not ok:
+        tail = stderr.strip().splitlines()
+        print(f"         freeze-tail extract error: {tail[-1] if tail else '(empty)'}")
+    return ok
+
+
+def _apply_freeze_tail(clip_path: Path, freeze_sec: float, fade_sec: float) -> bool:
+    """
+    Append a freeze-frame tail (with silence) to an assembled clip, in-place.
+
+    Used for clips whose last segment was NOT a _cliffhanger_cut (no extra speech
+    after the cut point, so silence padding is fine).
+    """
+    if freeze_sec <= 0:
+        return True
+
+    total_dur = _get_duration(clip_path)
+    if total_dur <= 0:
+        return True
+
+    fade_start = total_dur + freeze_sec - fade_sec
+    fc = (
+        f"[0:v]tpad=stop_mode=clone:stop_duration={freeze_sec:.3f}[vout];"
+        f"[0:a]apad=pad_dur={freeze_sec:.3f},"
+        f"afade=t=out:st={fade_start:.3f}:d={fade_sec:.3f}[aout]"
+    )
+
+    tmp = clip_path.with_stem(clip_path.stem + "_notail")
+    clip_path.rename(tmp)
+
+    ok, stderr = _run([
+        "ffmpeg", "-i", str(tmp),
+        "-filter_complex", fc,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        "-y", str(clip_path),
+    ])
+
+    if ok:
+        tmp.unlink()
+    else:
+        tail_lines = stderr.strip().splitlines()
+        print(f"         freeze-tail error: {tail_lines[-1] if tail_lines else '(empty)'}")
+        tmp.rename(clip_path)
+
+    return ok
+
+
 def _find_video(raw_dir: Path, ep_id: str) -> Path | None:
     for candidate in (raw_dir / f"{ep_id}.mp4", raw_dir / f"{int(ep_id):02d}.mp4"):
         if candidate.exists():
@@ -96,7 +202,14 @@ def _concat(segment_paths: list[Path], out: Path) -> bool:
     return ok
 
 
-def _assemble_one(plan: dict, raw_dir: Path, out_dir: Path, tmp: Path) -> bool:
+def _assemble_one(
+    plan: dict,
+    raw_dir: Path,
+    out_dir: Path,
+    tmp: Path,
+    tail_freeze_sec: float = 0.0,
+    tail_audio_fade_sec: float = 1.0,
+) -> bool:
     cid      = plan.get("clip_id", "?")
     title    = str(plan.get("clip_title", f"clip_{cid}"))
     segments = plan.get("segments", [])
@@ -129,9 +242,19 @@ def _assemble_one(plan: dict, raw_dir: Path, out_dir: Path, tmp: Path) -> bool:
 
         seg_out = tmp / f"c{cid_str}_s{j:02d}.mp4"
         note_str = f"  ({note})" if note else ""
-        print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}")
 
-        if _extract_segment(video, start, end, seg_out):
+        # Last segment with _cliffhanger_cut: bake freeze tail into segment extraction
+        # (single FFmpeg pass: captures remaining speech + freezes video at cut point).
+        is_last = (j == len(segments))
+        has_cliffhanger_cut = seg.get("_cliffhanger_cut", False)
+        if is_last and has_cliffhanger_cut and tail_freeze_sec > 0:
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s freeze tail")
+            ok = _extract_segment_with_tail(video, start, end, tail_freeze_sec, tail_audio_fade_sec, seg_out)
+        else:
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}")
+            ok = _extract_segment(video, start, end, seg_out)
+
+        if ok:
             seg_paths.append(seg_out)
         else:
             print(f"     seg {j}: extraction failed — skipped")
@@ -139,6 +262,10 @@ def _assemble_one(plan: dict, raw_dir: Path, out_dir: Path, tmp: Path) -> bool:
     if not seg_paths:
         print("     ERROR: no segments extracted\n")
         return False
+
+    # Did the last segment already have a freeze tail baked in?
+    last_seg = segments[-1]
+    tail_baked = last_seg.get("_cliffhanger_cut", False) and tail_freeze_sec > 0
 
     print(f"     Concatenating {len(seg_paths)} segments → {out_name}")
     if len(seg_paths) == 1:
@@ -148,8 +275,13 @@ def _assemble_one(plan: dict, raw_dir: Path, out_dir: Path, tmp: Path) -> bool:
         ok = _concat(seg_paths, out_path)
 
     if ok:
+        if tail_freeze_sec > 0 and not tail_baked:
+            # No cliffhanger cut — add freeze+silence tail as post-process
+            print(f"     Applying freeze tail ({tail_freeze_sec:.1f}s, silence) …")
+            _apply_freeze_tail(out_path, tail_freeze_sec, tail_audio_fade_sec)
         size_mb = out_path.stat().st_size / (1024 * 1024)
-        print(f"     OK  {out_name}  ({size_mb:.1f} MB  |  actual ~{total_sec:.0f}s)")
+        tail_note = f" + {tail_freeze_sec:.1f}s tail" if tail_freeze_sec > 0 else ""
+        print(f"     OK  {out_name}  ({size_mb:.1f} MB  |  actual ~{total_sec:.0f}s{tail_note})")
         print(f"     Hook: {cliff_reason}")
     else:
         print("     ERROR: concat failed")
@@ -167,6 +299,21 @@ def main(drama_name: str, filter_ids: set[int] | None) -> int:
         print(f"ERROR: clip_plans.json not found.\nRun: python scripts/plan_clips.py \"{drama_name}\" first.")
         return 1
 
+    # Read freeze-tail config from settings.yaml
+    tail_freeze_sec = 2.5
+    tail_audio_fade_sec = 1.0
+    cfg_path = _ROOT / "config" / "settings.yaml"
+    if cfg_path.exists():
+        try:
+            import yaml
+            with cfg_path.open(encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+            creatives_cfg = cfg.get("intelligence", {}).get("creatives", {})
+            tail_freeze_sec     = float(creatives_cfg.get("tail_freeze_sec",     tail_freeze_sec))
+            tail_audio_fade_sec = float(creatives_cfg.get("tail_audio_fade_sec", tail_audio_fade_sec))
+        except Exception:
+            pass
+
     with plans_path.open(encoding="utf-8") as f:
         data = json.load(f)
 
@@ -176,13 +323,16 @@ def main(drama_name: str, filter_ids: set[int] | None) -> int:
     print(f"Drama : {drama_name}")
     print(f"Plans : {len(plans)}/{len(all_plans)} selected")
     print(f"Output: {out_dir}")
+    print(f"Tail  : freeze={tail_freeze_sec:.1f}s  fade={tail_audio_fade_sec:.1f}s")
     print()
 
     errors: list[str] = []
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         for plan in plans:
-            ok = _assemble_one(plan, raw_dir, out_dir, tmp)
+            ok = _assemble_one(plan, raw_dir, out_dir, tmp,
+                               tail_freeze_sec=tail_freeze_sec,
+                               tail_audio_fade_sec=tail_audio_fade_sec)
             if not ok:
                 errors.append(f"clip {plan.get('clip_id', '?')}: assembly failed")
 
