@@ -55,6 +55,25 @@ logger = logging.getLogger("pipeline")
 # ── Project root (resolved once at import time) ───────────────────────────────
 _ROOT = Path(__file__).resolve().parent
 
+
+def _generate_dashboard() -> None:
+    """Regenerate data/output/dashboard.html after a run completes. Non-fatal."""
+    try:
+        import importlib.util as _ilu
+        import sys as _sys
+        _spec = _ilu.spec_from_file_location(
+            "generate_dashboard",
+            _ROOT / "scripts" / "generate_dashboard.py",
+        )
+        _mod = _ilu.module_from_spec(_spec)
+        _sys.modules[_spec.name] = _mod   # required for @dataclass to resolve module namespace
+        _spec.loader.exec_module(_mod)    # type: ignore[union-attr]
+        _mod.main()
+        logger.info("Dashboard updated → data/output/dashboard.html")
+    except Exception as _exc:
+        logger.warning("Dashboard generation skipped: %s", _exc)
+
+
 # ── Windows sleep prevention ──────────────────────────────────────────────────
 # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
 _ES_CONTINUOUS       = 0x80000000
@@ -422,6 +441,8 @@ class ShortDramaPipeline:
         CostAuditor(self._llm, output_dir=self._output_dir).emit_financial_report(
             self._cfg, cfg_key="llm", report_filename="cost_report_deepseek.json"
         )
+
+        _generate_dashboard()
 
     # ------------------------------------------------------------------ #
     #  Episode discovery                                                   #
@@ -1252,6 +1273,7 @@ def _run_post_review_only(cfg: dict) -> None:
     from src.intelligence.cost_auditor import CostAuditor as CA
     matrix_tmp = TranslationMatrix.__new__(TranslationMatrix)
     logger.info("Post-review stages complete.  Outputs → %s", output_dir)
+    _generate_dashboard()
 
 
 def _run_paywall_report(cfg: dict) -> None:
@@ -1428,6 +1450,7 @@ def main() -> None:
                 )
                 logger.info("Post-review: %s", drama_name)
                 _run_single(drama_name, base_cfg, args, cfg_path)
+            _generate_dashboard()
             return
 
         # ── --all (normal): run Stage 1-4 on unprocessed dramas ─────────────
@@ -1449,6 +1472,7 @@ def main() -> None:
             )
             logger.info("Drama: %s", drama_name)
             _run_single(drama_name, base_cfg, args, cfg_path)
+        _generate_dashboard()
         return
 
     if args.drama_name:
