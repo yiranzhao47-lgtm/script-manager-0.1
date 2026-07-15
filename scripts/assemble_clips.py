@@ -93,14 +93,16 @@ def _apply_tail_effect(
     clip_path.rename(tmp)
 
     if is_cliffhanger:
-        brief = 0.3
-        fade_start = max(total_dur + brief - fade_sec, 0.0)
+        # Clip ends exactly at the suspense cut; add freeze+darken, audio cuts fast.
+        brief_audio_fade = min(fade_sec, 0.3)
         fc = (
-            f"[0:v]tpad=stop_mode=clone:stop_duration={brief:.3f}[vout];"
-            f"[0:a]apad=pad_dur={brief:.3f},"
-            f"afade=t=out:st={fade_start:.3f}:d={fade_sec:.3f}[aout]"
+            f"[0:v]tpad=stop_mode=clone:stop_duration={freeze_sec:.3f},"
+            f"fade=t=out:st={total_dur:.3f}:d={freeze_sec:.3f}[vout];"
+            f"[0:a]apad=pad_dur={freeze_sec:.3f},"
+            f"afade=t=out:st={total_dur:.3f}:d={brief_audio_fade:.3f}[aout]"
         )
     else:
+        # Clip was extracted freeze_sec longer than planned to capture ambient audio.
         plan_dur = total_dur - freeze_sec
         fade_start = max(total_dur - fade_sec, 0.0)
         fc = (
@@ -225,10 +227,12 @@ def _assemble_one(
         seg_out = tmp / f"c{cid_str}_s{j:02d}.mp4"
         note_str = f"  ({note})" if note else ""
         is_last = (j == len(segments))
+        has_cliffhanger_cut = seg.get("_cliffhanger_cut", False)
 
-        if is_last and tail_freeze_sec > 0:
+        if is_last and not has_cliffhanger_cut and tail_freeze_sec > 0:
+            # Non-cliffhanger: extend to capture ambient audio for the fade tail.
             extended_end = _sec_to_ffmpeg(_ts_to_sec(end) + tail_freeze_sec)
-            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s")
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s ambient")
             ok = _extract_segment(video, start, extended_end, seg_out)
         else:
             print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}")

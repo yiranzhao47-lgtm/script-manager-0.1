@@ -239,13 +239,15 @@ def _process_zh_clip(
         note_str = f"  ({note})" if note else ""
 
         is_last = (j == len(segments))
+        has_cliffhanger_cut = seg.get("_cliffhanger_cut", False)
 
         # ── Extract segment (frame-accurate re-encode) ────────────────────
         raw_seg = tmp / f"c{cid_str}_s{j:02d}.mp4"
         t0 = time.perf_counter()
-        if is_last and tail_freeze_sec > 0:
+        if is_last and not has_cliffhanger_cut and tail_freeze_sec > 0:
+            # Non-cliffhanger: extend to capture ambient audio for the fade tail.
             extended_end = _sec_to_ffmpeg(_ts_to_sec(end) + tail_freeze_sec)
-            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s")
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s ambient")
             if not _extract_segment(video, _srt_to_ffmpeg(start), extended_end, raw_seg):
                 print(f"     seg {j}: extraction failed — skipped")
                 continue
