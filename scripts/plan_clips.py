@@ -191,6 +191,11 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
         sc_pivot   = sc.get("pivot_signals", [])
         sc_debt    = sc.get("unresolved_debt")      # None = tension resolved
         sc_actions = " ".join(sc.get("scene_actions", []))
+        # Combined protagonist context: scene_actions describes who acts;
+        # unresolved_debt describes whose story is affected.  A scene can be
+        # firmly in the protagonist's storyline even when she isn't the acting
+        # subject (e.g. "servants who insulted Lillian are punished").
+        sc_protagonist_ctx = sc_actions + (" " + sc_debt if sc_debt else "")
 
         # ── If target already reached, scan for cliffhanger pivot ──────────
         if target_reached:
@@ -210,15 +215,16 @@ def _extend_plan(plan: dict, ordered_scenes: list[dict], target_sec: int = 165) 
             break
 
         # ── Fix 3: protagonist unity guard ─────────────────────────────────
-        # Stop when protagonist is absent — covers episode boundaries AND
-        # intra-episode viewpoint/subplot changes.
-        # Exception: the very first scene of a BRAND-NEW episode (ep_id differs
-        # from last_ep, nothing in pending yet) is allowed through without a
-        # check so extension can at least start in the new episode.
-        # ep IDs are normalized (strip leading zeros) because the LLM may output
-        # "02" while drama_structure_graph uses "002".
+        # Stop when the scene is outside the protagonist's storyline.
+        # Checks both scene_actions AND unresolved_debt: the debt field reliably
+        # names the protagonist when the scene's consequences affect her story,
+        # even if she's not the acting subject (e.g. Luna Queen punishing servants
+        # who insulted Lillian — debt says "Lillian" but actions don't).
+        # Exception: first scene of a brand-new episode is allowed through so
+        # extension can start in the new episode.
+        # ep IDs are normalized (strip leading zeros) for LLM vs. graph format.
         _first_of_new_ep = (pending_ep is None and _ep_norm(ep_id) != _ep_norm(last_ep))
-        if protagonist_tokens and sc_actions and not _first_of_new_ep and not _protagonist_present(sc_actions):
+        if protagonist_tokens and sc_protagonist_ctx and not _first_of_new_ep and not _protagonist_present(sc_protagonist_ctx):
             if pending_ep is not None and ep_id != pending_ep:
                 _flush_pending()  # commit prior ep's scenes before stopping
             cliffhanger = sc_id
