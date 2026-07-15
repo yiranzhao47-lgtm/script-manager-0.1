@@ -117,8 +117,12 @@ def detect_drama_status(drama_name: str) -> DramaStatus:
         start_time = datetime.fromtimestamp(cache_dir.stat().st_mtime)
 
     # ── Episode counts ────────────────────────────────────────────────────
+    # n_total: true total from raw video files (accurate even mid-run)
+    raw_dir = _RAW_DIR / drama_name
+    n_total = len(list(raw_dir.glob("*.mp4"))) if raw_dir.exists() else 0
+
     aligned_dir = cache_dir / "aligned"
-    n_total = len(list(aligned_dir.glob("*.json"))) if aligned_dir.exists() else 0
+    n_aligned = len(list(aligned_dir.glob("*.json"))) if aligned_dir.exists() else 0
 
     trans_cache = cache_dir / "translation"
     n_translated = (
@@ -138,24 +142,28 @@ def detect_drama_status(drama_name: str) -> DramaStatus:
         operator_flags.append("CN字幕待审核")
 
     # ── Stage detection ────────────────────────────────────────────────────
+    # Use n_aligned as the "processed" denominator within Stage 1-3;
+    # use n_total (raw) as the overall total for display.
+    # IMPORTANT: check translation completeness BEFORE en_terms.json so dramas
+    # processed before Stage 4.5 was introduced are not falsely stuck at stage 4.
     if not cache_dir.exists():
         stage_idx, stage_label = 0, "未开始"
-    elif n_total == 0:
-        stage_idx, stage_label = 1, "ASR/OCR/对齐中"
+    elif n_aligned == 0:
+        stage_idx = 1
+        stage_label = f"ASR/OCR/对齐中 0/{n_total}集"
+    elif n_aligned < n_total:
+        stage_idx = 1
+        stage_label = f"ASR/OCR/对齐中 {n_aligned}/{n_total}集"
     elif not (meta_dir / "meta.json").exists():
         stage_idx, stage_label = 2, "MapReduce中"
-    elif n_refined < n_total:
+    elif n_refined < n_aligned:
         stage_idx = 3
         stage_label = f"精修中 {n_refined}/{n_total}集"
     elif review_pending:
         stage_idx = 3
         stage_label = f"精修完成（{n_total}集）— 待审核"
-    elif not (meta_dir / "en_terms.json").exists():
-        stage_idx, stage_label = 4, "术语锚定中"
-    elif n_translated < n_total:
-        stage_idx = 5
-        stage_label = f"翻译中 {n_translated}/{n_total}集"
-    else:
+    elif n_translated >= n_aligned:
+        # Translation complete (check before en_terms so pre-Stage-4.5 dramas aren't blocked)
         creatives_dir = output_dir / "creatives"
         has_ext = creatives_dir.exists() and bool(list(creatives_dir.glob("ext_*.mp4")))
         if has_ext:
@@ -164,8 +172,13 @@ def detect_drama_status(drama_name: str) -> DramaStatus:
         else:
             stage_idx = 6
             stage_label = f"翻译完成（{n_total}集）"
+    elif not (meta_dir / "en_terms.json").exists():
+        stage_idx, stage_label = 4, "术语锚定中"
+    else:
+        stage_idx = 5
+        stage_label = f"翻译中 {n_translated}/{n_total}集"
 
-    # ep_done: show refinement progress up through stage 4; translation from 5 on
+    # ep_done: show refinement progress through stage 4; translation from stage 5+
     ep_done = n_refined if stage_idx <= 4 else n_translated
 
     # ── Paywall settings ───────────────────────────────────────────────────
