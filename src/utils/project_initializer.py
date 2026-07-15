@@ -84,6 +84,7 @@ class ProjectInitializer:
                 "Running mandatory ROI calibration.",
                 len(current_videos),
             )
+            self._heal_orphan_checkpoints()
             self._run_calibration(current_videos)
             return
 
@@ -97,6 +98,7 @@ class ProjectInitializer:
                 "Running mandatory ROI calibration.",
                 len(new_files),
             )
+            self._heal_orphan_checkpoints()
             self._run_calibration(current_videos)
             self._write_checkpoint(current_videos)
             return
@@ -346,7 +348,71 @@ class ProjectInitializer:
     #  Purge stale data                                                    #
     # ------------------------------------------------------------------ #
 
+    def _heal_orphan_checkpoints(self) -> None:
+        """
+        Reset checkpoint entries whose backing data files are missing.
+
+        A "phantom aligned" entry occurs when the previous run was killed
+        between deleting data files and deleting the checkpoint, or when two
+        concurrent pipeline runs raced on the same cache directory.  Without
+        this repair, affected episodes are permanently skipped on every resume.
+
+        Degradation ladder (coarsest state first so each check subsumes later ones):
+          aligned  → pending   when _aligned.json absent
+          ocr_done → pending   when _ocr.json absent
+          asr_done → pending   when _asr.json absent
+        """
+        if not self._ckpt_path.exists():
+            return
+
+        try:
+            with self._ckpt_path.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        episodes = data.get("episodes", {})
+        asr_dir     = self._cache_dir / "asr"
+        ocr_dir     = self._cache_dir / "ocr"
+        aligned_dir = self._cache_dir / "aligned"
+
+        healed: list[str] = []
+        for ep_id, state in list(episodes.items()):
+            if state == "aligned":
+                if not (aligned_dir / f"{ep_id}_aligned.json").exists():
+                    episodes[ep_id] = "pending"
+                    healed.append(f"{ep_id}:aligned→pending")
+            elif state == "ocr_done":
+                if not (ocr_dir / f"{ep_id}_ocr.json").exists():
+                    episodes[ep_id] = "pending"
+                    healed.append(f"{ep_id}:ocr_done→pending")
+            elif state == "asr_done":
+                if not (asr_dir / f"{ep_id}_asr.json").exists():
+                    episodes[ep_id] = "pending"
+                    healed.append(f"{ep_id}:asr_done→pending")
+
+        if not healed:
+            return
+
+        logger.warning(
+            "[Init] Checkpoint integrity: %d orphan entry(s) reset → %s",
+            len(healed), ", ".join(healed),
+        )
+        tmp = self._ckpt_path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        tmp.replace(self._ckpt_path)
+
     def _purge_stale_data(self) -> None:
+        # Delete checkpoint FIRST so any crash during the data-file purge below
+        # leaves the system in a cleanly restartable state.  If we deleted data
+        # files first and then crashed before deleting the checkpoint, the next
+        # run would see phantom "aligned" entries with no backing files.
+        if self._ckpt_path.exists():
+            self._ckpt_path.unlink()
+            logger.info("[Init] Deleted checkpoint.json")
+
         for sub in ("asr", "ocr", "aligned", "map_batches", "drama_map"):
             d = self._cache_dir / sub
             if d.exists():
@@ -368,10 +434,6 @@ class ProjectInitializer:
                 if fp.exists():
                     fp.unlink()
             logger.info("[Init] Purged output/*/*.srt + reports")
-
-        if self._ckpt_path.exists():
-            self._ckpt_path.unlink()
-            logger.info("[Init] Deleted checkpoint.json")
 
     # ------------------------------------------------------------------ #
     #  Patch settings.yaml                                                 #

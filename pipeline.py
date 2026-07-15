@@ -29,6 +29,7 @@ import argparse
 import ctypes
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -54,6 +55,55 @@ logger = logging.getLogger("pipeline")
 
 # ── Project root (resolved once at import time) ───────────────────────────────
 _ROOT = Path(__file__).resolve().parent
+
+
+# ── Per-drama process lock ─────────────────────────────────────────────────────
+
+def _acquire_pipeline_lock(cache_dir: Path, drama_name: str) -> Path:
+    """
+    Write a .pipeline.lock file in *cache_dir* containing this process's PID.
+
+    Raises RuntimeError if a live process already holds the lock, preventing
+    two pipeline runs from racing on the same drama's cache and checkpoint.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_dir / ".pipeline.lock"
+
+    if lock_path.exists():
+        try:
+            existing_pid = int(lock_path.read_text(encoding="utf-8").strip())
+            try:
+                os.kill(existing_pid, 0)   # signal 0: existence check only
+                is_running = True
+            except OSError:
+                is_running = False
+
+            if is_running:
+                raise RuntimeError(
+                    f"Another pipeline run for '{drama_name}' is already in progress "
+                    f"(PID {existing_pid}).  Kill it first, then delete the lock:\n"
+                    f"  {lock_path}"
+                )
+        except (ValueError, OSError):
+            pass  # Corrupt lock file — overwrite
+
+        logger.warning(
+            "[Lock] Stale lock for '%s' (PID no longer alive) — overwriting.",
+            drama_name,
+        )
+
+    lock_path.write_text(str(os.getpid()), encoding="utf-8")
+    logger.info("[Lock] Acquired pipeline lock for '%s' (PID %d)", drama_name, os.getpid())
+    return lock_path
+
+
+def _release_pipeline_lock(lock_path: Path) -> None:
+    """Remove the lock file. Silent no-op if already gone."""
+    try:
+        lock_path.unlink(missing_ok=True)
+        logger.info("[Lock] Released pipeline lock.")
+    except OSError:
+        pass
 
 
 def _generate_dashboard() -> None:
@@ -1383,23 +1433,28 @@ def _run_single(
         _run_translation_only(cfg, episode_filter=episode_filter)
         return
 
-    # ── Auto-detect show change and self-heal ROI ─────────────────────────
-    from src.utils.project_initializer import ProjectInitializer
-    ProjectInitializer(cfg).auto_detect_and_heal()
-    # Reload settings.yaml in case the ROI was just patched by the initializer,
-    # then re-derive drama paths (yaml only stores non-path settings like ROI).
-    # Re-apply the auto-detected mode/language so the reload doesn't lose them.
-    resolved_mode = cfg["pipeline"]["mode"]
-    resolved_lang = cfg["pipeline"]["source_language"]
-    base_cfg_reloaded = load_config(cfg_path)
-    cfg = _derive_paths(drama_name, base_cfg_reloaded)
-    cfg["pipeline"]["mode"] = resolved_mode
-    _apply_lang_for_mode(cfg, resolved_lang)
+    # ── Per-drama process lock (guards all cache writes below) ───────────
+    _lock = _acquire_pipeline_lock(Path(cfg["paths"]["cache_dir"]), drama_name)
+    try:
+        # ── Auto-detect show change and self-heal ROI ─────────────────────────
+        from src.utils.project_initializer import ProjectInitializer
+        ProjectInitializer(cfg).auto_detect_and_heal()
+        # Reload settings.yaml in case the ROI was just patched by the initializer,
+        # then re-derive drama paths (yaml only stores non-path settings like ROI).
+        # Re-apply the auto-detected mode/language so the reload doesn't lose them.
+        resolved_mode = cfg["pipeline"]["mode"]
+        resolved_lang = cfg["pipeline"]["source_language"]
+        base_cfg_reloaded = load_config(cfg_path)
+        cfg = _derive_paths(drama_name, base_cfg_reloaded)
+        cfg["pipeline"]["mode"] = resolved_mode
+        _apply_lang_for_mode(cfg, resolved_lang)
 
-    video_dir = Path(args.video_dir) if args.video_dir else None
+        video_dir = Path(args.video_dir) if args.video_dir else None
 
-    pipeline = ShortDramaPipeline(cfg)
-    pipeline.run(video_dir=video_dir, skip_preflight=args.skip_preflight, yes=args.yes)
+        pipeline = ShortDramaPipeline(cfg)
+        pipeline.run(video_dir=video_dir, skip_preflight=args.skip_preflight, yes=args.yes)
+    finally:
+        _release_pipeline_lock(_lock)
 
 
 def main() -> None:
