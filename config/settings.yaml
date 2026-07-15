@@ -25,7 +25,7 @@ same_lang:
       word_low_conf_threshold: 0.40   # per-word probability below this → word flagged as low_confidence
   ocr:
     fps: 1                  # frames per second sampled for OCR (ASR is master; 1 FPS covers any subtitle ≥1 s)
-    roi: [0.662, 0.814]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
+    roi: [0.642, 0.813]  # [y_start_ratio, y_end_ratio] of frame height (subtitle band)
     language: "ch"          # PaddleOCR language code — "ch" for Chinese, "en" for English
     use_gpu: true
     min_line_confidence: 0.50   # discard OCR text boxes with confidence below this value
@@ -132,7 +132,7 @@ intelligence:
   # ── Paywall report scene compression range ───────────────────────────────────
   paywall:
     scene_ep_range_start: 1    # first episode included in scene compression feed (1-based)
-    scene_ep_range_end: 26     # last episode (exclusive) — episodes [start, end) are sent to Claude
+    scene_ep_range_end: 36     # last episode (exclusive) — episodes [start, end) are sent to Claude
 
   # ── Multi-language translation matrix (run with: python pipeline.py --translate-only) ─
   translation:

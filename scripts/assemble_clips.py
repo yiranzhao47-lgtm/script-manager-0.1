@@ -72,15 +72,13 @@ def _apply_tail_effect(
     """
     Post-process an assembled clip to add a polished tail, in-place.
 
-    The last segment was already extracted with freeze_sec of extra source video,
-    so the assembled clip is freeze_sec longer than the planned content.
+    Cliffhanger: the last segment was extracted with a brief speech tail (0.5 s).
+    Natural playback fills those extra frames.  We append a freeze and fast audio
+    fade to silence.
 
-    Cliffhanger: natural playback (actor still speaking/moving) fills those extra
-    seconds.  We append a brief 0.3s video freeze and fade audio to silence.
-
-    Non-cliffhanger: the planned content ends at (total_dur - freeze_sec).  We
-    trim video there, clone-freeze the last frame for freeze_sec, gradually darken
-    it to black, and fade the original ambient audio to silence.
+    Non-cliffhanger: the clip is exactly plan_dur long (no pre-extraction extension).
+    We clone-freeze the last frame for freeze_sec, darken it to black, and pad
+    audio with silence that fades out.
     """
     if freeze_sec <= 0:
         return True
@@ -102,14 +100,16 @@ def _apply_tail_effect(
             f"afade=t=out:st={total_dur:.3f}:d={brief_audio_fade:.3f}[aout]"
         )
     else:
-        # Clip was extracted freeze_sec longer than planned to capture ambient audio.
-        plan_dur = total_dur - freeze_sec
-        fade_start = max(total_dur - fade_sec, 0.0)
+        # Clip is at exact plan_dur; freeze-pad then fade to black + silence.
+        # NOTE: avoid trim+setpts here — on B-frame H.264 concat files, setpts
+        # computes STARTPTS from the first decode-order packet (which is seg2's
+        # first I-frame, not seg1's), silently stripping seg1's duration from the
+        # output.  Using tpad+apad avoids any PTS manipulation.
         fc = (
-            f"[0:v]trim=end={plan_dur:.3f},setpts=PTS-STARTPTS,"
-            f"tpad=stop_mode=clone:stop_duration={freeze_sec:.3f},"
-            f"fade=t=out:st={plan_dur:.3f}:d={freeze_sec:.3f}[vout];"
-            f"[0:a]afade=t=out:st={fade_start:.3f}:d={fade_sec:.3f}[aout]"
+            f"[0:v]tpad=stop_mode=clone:stop_duration={freeze_sec:.3f},"
+            f"fade=t=out:st={total_dur:.3f}:d={freeze_sec:.3f}[vout];"
+            f"[0:a]apad=pad_dur={freeze_sec:.3f},"
+            f"afade=t=out:st={total_dur:.3f}:d={min(fade_sec, freeze_sec):.3f}[aout]"
         )
 
     ok, stderr = _run([
@@ -236,12 +236,8 @@ def _assemble_one(
             extended_end = _sec_to_ffmpeg(_ts_to_sec(end) + _CLIFF_SPEECH_TAIL)
             print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{_CLIFF_SPEECH_TAIL:.1f}s speech tail")
             ok = _extract_segment(video, start, extended_end, seg_out)
-        elif is_last and not has_cliffhanger_cut and tail_freeze_sec > 0:
-            # Non-cliffhanger: extend to capture ambient audio for the fade tail.
-            extended_end = _sec_to_ffmpeg(_ts_to_sec(end) + tail_freeze_sec)
-            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s ambient")
-            ok = _extract_segment(video, start, extended_end, seg_out)
         else:
+            # Non-cliffhanger or mid segment: extract exact range; tpad appends freeze.
             print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}")
             ok = _extract_segment(video, start, end, seg_out)
 
