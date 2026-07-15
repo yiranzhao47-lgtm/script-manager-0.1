@@ -329,7 +329,35 @@ def _validate_plans(plans: dict, episode_conflicts: dict) -> list[str]:
 
 # ─── Layer 3: hook_end_time from scene data ──────────────────────────────────
 
-def _apply_hook_end_time(plans: dict, episode_conflicts: dict) -> int:
+def _snap_to_subtitle_end(
+    srt_entries: list[tuple[str, str, str]],
+    ts: str,
+) -> str | None:
+    """
+    Return the SRT end timestamp for the subtitle that CONTAINS ts.
+
+    The LLM-generated hook_end_time often lands mid-subtitle (the model
+    interpolates a plausible-sounding timestamp rather than copying one
+    verbatim from the SRT).  Snapping to the subtitle's actual end ensures
+    the cut falls after the actor finishes the line, not mid-sentence.
+
+    If ts falls in a gap between subtitles, returns the end of the last
+    subtitle that starts before ts.
+    """
+    ts_sec = _ts_to_sec(ts)
+    last_before: str | None = None
+    for start_ts, end_ts, _ in srt_entries:
+        s_sec = _ts_to_sec(start_ts)
+        e_sec = _ts_to_sec(end_ts)
+        if s_sec > ts_sec + 0.1:
+            break
+        if s_sec <= ts_sec <= e_sec + 0.1:
+            return end_ts   # ts is inside this subtitle → snap to its end
+        last_before = end_ts
+    return last_before
+
+
+def _apply_hook_end_time(plans: dict, episode_conflicts: dict, srt_dir: Path) -> int:
     """
     For each clip's final segment, replace end_time with the scene's hook_end_time
     when available and meaningfully earlier than the scene boundary.
@@ -337,6 +365,9 @@ def _apply_hook_end_time(plans: dict, episode_conflicts: dict) -> int:
     hook_end_time is a sub-scene timestamp pointing to the last open-tension line
     (question, ultimatum, unresolved demand) — cutting there leaves the viewer
     mid-confrontation instead of at the settled scene boundary.
+
+    The LLM-produced hook_end_time may not align with any SRT boundary, so we
+    snap it to the end of the containing subtitle before applying.
 
     Returns the count of clips adjusted.
     """
@@ -347,6 +378,8 @@ def _apply_hook_end_time(plans: dict, episode_conflicts: dict) -> int:
             het = scene.get("hook_end_time") or ""
             if sid and het:
                 hook_end_index[sid] = het
+
+    srt_cache: dict[str, list] = {}
 
     adjusted = 0
     for plan in plans.get("clip_plans", []):
@@ -365,10 +398,34 @@ def _apply_hook_end_time(plans: dict, episode_conflicts: dict) -> int:
         if not hook_end or not current_end:
             continue
         # Apply only when hook_end is at least 2 s before the scene boundary
-        if _ts_to_sec(current_end) - _ts_to_sec(hook_end) >= 2.0:
-            last_seg["end_time"]        = hook_end
-            last_seg["_cliffhanger_cut"] = True
-            adjusted += 1
+        if _ts_to_sec(current_end) - _ts_to_sec(hook_end) < 2.0:
+            continue
+
+        # Snap hook_end to the end of the containing SRT subtitle so the cut
+        # never falls mid-sentence.
+        ep_id = last_seg.get("episode_id", "")
+        if ep_id not in srt_cache:
+            candidates = [srt_dir / f"{ep_id}.srt"]
+            try:
+                candidates.append(srt_dir / f"{int(ep_id):03d}.srt")
+                candidates.append(srt_dir / f"{int(ep_id):02d}.srt")
+            except ValueError:
+                pass
+            srt_cache[ep_id] = next(
+                (_parse_srt(p) for p in candidates if p.exists()), []
+            )
+
+        snapped = _snap_to_subtitle_end(srt_cache[ep_id], hook_end)
+        if snapped and snapped != hook_end:
+            logger.debug(
+                "hook_end_time snapped: %s → %s (ep%s %s)",
+                hook_end, snapped, ep_id, last_sid,
+            )
+            hook_end = snapped
+
+        last_seg["end_time"]        = hook_end
+        last_seg["_cliffhanger_cut"] = True
+        adjusted += 1
 
     return adjusted
 
@@ -596,13 +653,17 @@ def main(drama_name: str) -> int:
     if n_extended:
         logger.info("Auto-extended %d plan(s) to reach ~165s target.", n_extended)
 
+    # Determine SRT directory from source_language (EN dramas use "en/", ZH use "cn/")
+    source_language = cfg.get("pipeline", {}).get("source_language", "zh")
+    srt_subdir = "cn" if source_language == "zh" else source_language
+    srt_dir = _ROOT / "data" / "output" / drama_name / srt_subdir
+
     # Layer 3: apply hook_end_time from scene data (sub-scene precision)
-    n_hook = _apply_hook_end_time(plans, episode_conflicts)
+    n_hook = _apply_hook_end_time(plans, episode_conflicts, srt_dir)
     if n_hook:
         logger.info("Applied hook_end_time cut to %d clip(s) from scene data.", n_hook)
 
     # Layer 4: SRT line-scan fallback for clips without hook_end_time
-    srt_dir = _ROOT / "data" / "output" / drama_name / "cn"
     n_srt = _apply_srt_suspense_cut(plans, episode_conflicts, srt_dir)
     if n_srt:
         logger.info("Applied SRT suspense cut to %d clip(s) via line scan.", n_srt)
@@ -652,11 +713,15 @@ def extend_only(drama_name: str) -> int:
     n_extended = _extend_short_plans(plans, episode_conflicts, target_sec=165)
     logger.info("Extended %d plan(s).", n_extended)
 
-    n_hook = _apply_hook_end_time(plans, episode_conflicts)
+    cfg = _load_cfg()
+    source_language = cfg.get("pipeline", {}).get("source_language", "zh")
+    srt_subdir = "cn" if source_language == "zh" else source_language
+    srt_dir = _ROOT / "data" / "output" / drama_name / srt_subdir
+
+    n_hook = _apply_hook_end_time(plans, episode_conflicts, srt_dir)
     if n_hook:
         logger.info("Applied hook_end_time cut to %d clip(s) from scene data.", n_hook)
 
-    srt_dir = _ROOT / "data" / "output" / drama_name / "cn"
     n_srt = _apply_srt_suspense_cut(plans, episode_conflicts, srt_dir)
     if n_srt:
         logger.info("Applied SRT suspense cut to %d clip(s) via line scan.", n_srt)
