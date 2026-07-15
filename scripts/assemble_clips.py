@@ -62,76 +62,59 @@ def _get_duration(path: Path) -> float:
         return 0.0
 
 
-def _extract_segment_with_tail(
-    video: Path,
-    start: str,
-    end: str,
+def _apply_tail_effect(
+    clip_path: Path,
+    is_cliffhanger: bool,
     freeze_sec: float,
     fade_sec: float,
-    out: Path,
+    venc_args: list[str] | None = None,
 ) -> bool:
     """
-    Extract a segment and bake in a freeze-frame tail in a single FFmpeg pass.
+    Post-process an assembled clip to add a polished tail, in-place.
 
-    Used for the last segment of a _cliffhanger_cut clip:
-      - Source is read from start to (end + freeze_sec) to capture remaining speech.
-      - Video is trimmed at the planned 'end' point then frozen for freeze_sec.
-      - Audio plays through the tail and fades to silence over the last fade_sec.
-    """
-    dur = _ts_to_sec(end) - _ts_to_sec(start)
-    total = dur + freeze_sec
-    fade_start = total - fade_sec
-    fc = (
-        f"[0:v]trim=end={dur:.3f},setpts=PTS-STARTPTS,"
-        f"tpad=stop_mode=clone:stop_duration={freeze_sec:.3f}[vout];"
-        f"[0:a]afade=t=out:st={fade_start:.3f}:d={fade_sec:.3f}[aout]"
-    )
-    ok, stderr = _run([
-        "ffmpeg", "-i", str(video),
-        "-ss", _srt_to_ffmpeg(start),
-        "-to", _sec_to_ffmpeg(_ts_to_sec(end) + freeze_sec),
-        "-filter_complex", fc,
-        "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
-        "-y", str(out),
-    ])
-    if not ok:
-        tail = stderr.strip().splitlines()
-        print(f"         freeze-tail extract error: {tail[-1] if tail else '(empty)'}")
-    return ok
+    The last segment was already extracted with freeze_sec of extra source video,
+    so the assembled clip is freeze_sec longer than the planned content.
 
+    Cliffhanger: natural playback (actor still speaking/moving) fills those extra
+    seconds.  We append a brief 0.3s video freeze and fade audio to silence.
 
-def _apply_freeze_tail(clip_path: Path, freeze_sec: float, fade_sec: float) -> bool:
-    """
-    Append a freeze-frame tail (with silence) to an assembled clip, in-place.
-
-    Used for clips whose last segment was NOT a _cliffhanger_cut (no extra speech
-    after the cut point, so silence padding is fine).
+    Non-cliffhanger: the planned content ends at (total_dur - freeze_sec).  We
+    trim video there, clone-freeze the last frame for freeze_sec, gradually darken
+    it to black, and fade the original ambient audio to silence.
     """
     if freeze_sec <= 0:
         return True
-
     total_dur = _get_duration(clip_path)
     if total_dur <= 0:
         return True
 
-    fade_start = total_dur + freeze_sec - fade_sec
-    fc = (
-        f"[0:v]tpad=stop_mode=clone:stop_duration={freeze_sec:.3f}[vout];"
-        f"[0:a]apad=pad_dur={freeze_sec:.3f},"
-        f"afade=t=out:st={fade_start:.3f}:d={fade_sec:.3f}[aout]"
-    )
-
+    enc = venc_args or ["-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p"]
     tmp = clip_path.with_stem(clip_path.stem + "_notail")
     clip_path.rename(tmp)
+
+    if is_cliffhanger:
+        brief = 0.3
+        fade_start = max(total_dur + brief - fade_sec, 0.0)
+        fc = (
+            f"[0:v]tpad=stop_mode=clone:stop_duration={brief:.3f}[vout];"
+            f"[0:a]apad=pad_dur={brief:.3f},"
+            f"afade=t=out:st={fade_start:.3f}:d={fade_sec:.3f}[aout]"
+        )
+    else:
+        plan_dur = total_dur - freeze_sec
+        fade_start = max(total_dur - fade_sec, 0.0)
+        fc = (
+            f"[0:v]trim=end={plan_dur:.3f},setpts=PTS-STARTPTS,"
+            f"tpad=stop_mode=clone:stop_duration={freeze_sec:.3f},"
+            f"fade=t=out:st={plan_dur:.3f}:d={freeze_sec:.3f}[vout];"
+            f"[0:a]afade=t=out:st={fade_start:.3f}:d={fade_sec:.3f}[aout]"
+        )
 
     ok, stderr = _run([
         "ffmpeg", "-i", str(tmp),
         "-filter_complex", fc,
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        *enc,
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         "-y", str(clip_path),
@@ -141,9 +124,8 @@ def _apply_freeze_tail(clip_path: Path, freeze_sec: float, fade_sec: float) -> b
         tmp.unlink()
     else:
         tail_lines = stderr.strip().splitlines()
-        print(f"         freeze-tail error: {tail_lines[-1] if tail_lines else '(empty)'}")
+        print(f"         tail-effect error: {tail_lines[-1] if tail_lines else '(empty)'}")
         tmp.rename(clip_path)
-
     return ok
 
 
@@ -242,14 +224,12 @@ def _assemble_one(
 
         seg_out = tmp / f"c{cid_str}_s{j:02d}.mp4"
         note_str = f"  ({note})" if note else ""
-
-        # Last segment with _cliffhanger_cut: bake freeze tail into segment extraction
-        # (single FFmpeg pass: captures remaining speech + freezes video at cut point).
         is_last = (j == len(segments))
-        has_cliffhanger_cut = seg.get("_cliffhanger_cut", False)
-        if is_last and has_cliffhanger_cut and tail_freeze_sec > 0:
-            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s freeze tail")
-            ok = _extract_segment_with_tail(video, start, end, tail_freeze_sec, tail_audio_fade_sec, seg_out)
+
+        if is_last and tail_freeze_sec > 0:
+            extended_end = _sec_to_ffmpeg(_ts_to_sec(end) + tail_freeze_sec)
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s")
+            ok = _extract_segment(video, start, extended_end, seg_out)
         else:
             print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}")
             ok = _extract_segment(video, start, end, seg_out)
@@ -263,9 +243,8 @@ def _assemble_one(
         print("     ERROR: no segments extracted\n")
         return False
 
-    # Did the last segment already have a freeze tail baked in?
     last_seg = segments[-1]
-    tail_baked = last_seg.get("_cliffhanger_cut", False) and tail_freeze_sec > 0
+    is_cliffhanger = last_seg.get("_cliffhanger_cut", False)
 
     print(f"     Concatenating {len(seg_paths)} segments → {out_name}")
     if len(seg_paths) == 1:
@@ -275,10 +254,10 @@ def _assemble_one(
         ok = _concat(seg_paths, out_path)
 
     if ok:
-        if tail_freeze_sec > 0 and not tail_baked:
-            # No cliffhanger cut — add freeze+silence tail as post-process
-            print(f"     Applying freeze tail ({tail_freeze_sec:.1f}s, silence) …")
-            _apply_freeze_tail(out_path, tail_freeze_sec, tail_audio_fade_sec)
+        if tail_freeze_sec > 0:
+            kind = "cliffhanger" if is_cliffhanger else "ambient-fade"
+            print(f"     Applying tail effect ({tail_freeze_sec:.1f}s, {kind}) …")
+            _apply_tail_effect(out_path, is_cliffhanger, tail_freeze_sec, tail_audio_fade_sec)
         size_mb = out_path.stat().st_size / (1024 * 1024)
         tail_note = f" + {tail_freeze_sec:.1f}s tail" if tail_freeze_sec > 0 else ""
         print(f"     OK  {out_name}  ({size_mb:.1f} MB  |  actual ~{total_sec:.0f}s{tail_note})")

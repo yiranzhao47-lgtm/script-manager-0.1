@@ -208,7 +208,7 @@ def _process_zh_clip(
     cumulative_offset = 0.0
 
     # Read freeze-tail config (imported lazily to avoid circular import)
-    from scripts.assemble_clips import _apply_freeze_tail, _get_duration, _sec_to_ffmpeg
+    from scripts.assemble_clips import _apply_tail_effect, _sec_to_ffmpeg
 
     cfg_path = _ROOT / "config" / "settings.yaml"
     tail_freeze_sec = 2.5
@@ -239,17 +239,14 @@ def _process_zh_clip(
         note_str = f"  ({note})" if note else ""
 
         is_last = (j == len(segments))
-        has_cliffhanger_cut = seg.get("_cliffhanger_cut", False)
 
         # ── Extract segment (frame-accurate re-encode) ────────────────────
         raw_seg = tmp / f"c{cid_str}_s{j:02d}.mp4"
         t0 = time.perf_counter()
-        if is_last and has_cliffhanger_cut and tail_freeze_sec > 0:
-            # Bake freeze tail into this segment: freeze video at cut point,
-            # audio continues (captures remaining speech) then fades.
-            from scripts.assemble_clips import _extract_segment_with_tail
-            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s freeze tail")
-            if not _extract_segment_with_tail(video, start, end, tail_freeze_sec, tail_audio_fade_sec, raw_seg):
+        if is_last and tail_freeze_sec > 0:
+            extended_end = _sec_to_ffmpeg(_ts_to_sec(end) + tail_freeze_sec)
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s")
+            if not _extract_segment(video, _srt_to_ffmpeg(start), extended_end, raw_seg):
                 print(f"     seg {j}: extraction failed — skipped")
                 continue
         else:
@@ -299,11 +296,12 @@ def _process_zh_clip(
         ok = _concat(raw_segs, out_path)
 
     clip_elapsed = time.perf_counter() - t_clip_start
-    tail_baked = segments[-1].get("_cliffhanger_cut", False) and tail_freeze_sec > 0
+    is_cliffhanger = segments[-1].get("_cliffhanger_cut", False)
     if ok:
-        if tail_freeze_sec > 0 and not tail_baked:
-            print(f"     Applying freeze tail ({tail_freeze_sec:.1f}s, silence) …")
-            _apply_freeze_tail(out_path, tail_freeze_sec, tail_audio_fade_sec)
+        if tail_freeze_sec > 0:
+            kind = "cliffhanger" if is_cliffhanger else "ambient-fade"
+            print(f"     Applying tail effect ({tail_freeze_sec:.1f}s, {kind}) …")
+            _apply_tail_effect(out_path, is_cliffhanger, tail_freeze_sec, tail_audio_fade_sec, _venc_args())
         size_mb = out_path.stat().st_size / (1024 * 1024)
         concat_elapsed = time.perf_counter() - t0
         tail_note = f" + {tail_freeze_sec:.1f}s tail" if tail_freeze_sec > 0 else ""
