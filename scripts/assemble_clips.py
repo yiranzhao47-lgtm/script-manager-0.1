@@ -229,7 +229,14 @@ def _assemble_one(
         is_last = (j == len(segments))
         has_cliffhanger_cut = seg.get("_cliffhanger_cut", False)
 
-        if is_last and not has_cliffhanger_cut and tail_freeze_sec > 0:
+        _CLIFF_SPEECH_TAIL = 0.5  # seconds past subtitle end to let actor finish speaking
+
+        if is_last and has_cliffhanger_cut:
+            # Cliffhanger: short tail so actor finishes the line; freeze+darken after.
+            extended_end = _sec_to_ffmpeg(_ts_to_sec(end) + _CLIFF_SPEECH_TAIL)
+            print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{_CLIFF_SPEECH_TAIL:.1f}s speech tail")
+            ok = _extract_segment(video, start, extended_end, seg_out)
+        elif is_last and not has_cliffhanger_cut and tail_freeze_sec > 0:
             # Non-cliffhanger: extend to capture ambient audio for the fade tail.
             extended_end = _sec_to_ffmpeg(_ts_to_sec(end) + tail_freeze_sec)
             print(f"     seg {j}/{len(segments)}: ep{ep_id}  {start}→{end}  [{dur:.0f}s]{note_str}  +{tail_freeze_sec:.1f}s ambient")
