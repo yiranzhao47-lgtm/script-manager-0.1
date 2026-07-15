@@ -291,7 +291,7 @@ class OverlapAligner:
         # cold open with no clear voice) while OCR captured the on-screen subtitles.
         leading_segs: list[AlignedSegment] = []
         if asr_segs and ocr_blocks:
-            first_asr_start = asr_segs[0]["start"]
+            first_asr_start = float(asr_segs[0].get("start", 0.0))
             cutoff = first_asr_start - 1.0  # 1s safety margin before first ASR
             leading = [b for b in ocr_blocks if b["end"] <= cutoff]
             if leading:

@@ -292,6 +292,12 @@ class LLMClient:
             Logical caller tag used to break down token costs per pipeline
             stage in the FinOps ledger (e.g. "Subtitle_Refine", "Map_Extract").
         """
+        if not self._api_key:
+            raise LLMCallError(
+                f"API key is not set. Export the required environment variable "
+                f"(see execution.llm.api_key_env in settings.yaml)."
+            )
+
         limit = max_tokens or self._default_max_tokens
 
         try:

@@ -147,6 +147,10 @@ def _iter_frames(
             yield timestamp, frame[y_start:y_end, :]
             frame_idx += 1
     finally:
+        try:
+            proc.terminate()   # signal ffmpeg to exit before draining the pipe
+        except OSError:
+            pass
         proc.stdout.close()
         proc.wait()
 
