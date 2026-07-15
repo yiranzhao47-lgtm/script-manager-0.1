@@ -86,7 +86,8 @@ def _ts_to_sec(ts: str) -> float:
 def _find_video(raw_dir: Path, ep_id: str) -> Path | None:
     candidates = [raw_dir / f"{ep_id}.mp4"]
     try:
-        candidates.append(raw_dir / f"{int(ep_id):02d}.mp4")
+        n = int(ep_id)
+        candidates += [raw_dir / f"{n:02d}.mp4", raw_dir / f"{n:03d}.mp4"]
     except ValueError:
         pass
     for c in candidates:

@@ -132,9 +132,15 @@ def _apply_tail_effect(
 
 
 def _find_video(raw_dir: Path, ep_id: str) -> Path | None:
-    for candidate in (raw_dir / f"{ep_id}.mp4", raw_dir / f"{int(ep_id):02d}.mp4"):
-        if candidate.exists():
-            return candidate
+    candidates = [raw_dir / f"{ep_id}.mp4"]
+    try:
+        n = int(ep_id)
+        candidates += [raw_dir / f"{n:02d}.mp4", raw_dir / f"{n:03d}.mp4"]
+    except ValueError:
+        pass
+    for c in candidates:
+        if c.exists():
+            return c
     return None
 
 
