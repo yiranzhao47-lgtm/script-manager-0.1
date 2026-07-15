@@ -221,7 +221,7 @@ class EpisodeRefiner:
 
         if valid:
             logger.info("EpisodeRefiner: %s — SRT valid on first attempt", episode_id)
-            _atomic_write(out_path, _clip_overlapping_ends(_merge_short_fragments(_merge_artifact_fragments(raw))))
+            _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(raw)))))
             return str(out_path)
 
         # ── LLM call #2: correction retry ─────────────────────────────────
@@ -243,7 +243,7 @@ class EpisodeRefiner:
 
         if valid2:
             logger.info("EpisodeRefiner: %s — SRT valid after correction retry", episode_id)
-            _atomic_write(out_path, _clip_overlapping_ends(_merge_short_fragments(_merge_artifact_fragments(raw2))))
+            _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(raw2)))))
             return str(out_path)
 
         # ── Both attempts failed: fallback ────────────────────────────────
@@ -451,7 +451,7 @@ class EpisodeRefiner:
         """
         fallback_srt = self._assemble_fallback_srt(segments)
         out_path = self._cn_dir / f"{episode_id}.srt"
-        _atomic_write(out_path, _clip_overlapping_ends(_merge_short_fragments(_merge_artifact_fragments(fallback_srt))))
+        _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(fallback_srt)))))
 
         self._append_validation_report(episode_id, reason)
         logger.warning(
@@ -651,6 +651,96 @@ def _merge_short_fragments(srt_text: str) -> str:
     lines: list[str] = []
     for idx, (start, end, text) in enumerate(
             ((b[0], b[1], b[2]) for b in blocks), 1):
+        lines.extend([str(idx), f"{start} --> {end}", text, ''])
+    if lines and lines[-1] == '':
+        lines.pop()
+    return '\n'.join(lines)
+
+
+def _split_long_segments(srt_text: str, max_chars: int = 25, min_dur_ms: int = 400) -> str:
+    """Split Chinese subtitle entries longer than max_chars at the punctuation nearest the midpoint.
+
+    Long single-utterance ASR segments (e.g. 32-char multi-clause lines from
+    Whisper) are split into two shorter entries.  Timing is distributed
+    proportionally to character counts.  Entries without a usable split point,
+    or where either half would be shorter than min_dur_ms, are left unchanged.
+
+    Split-point priority (searched left-to-right after filtering):
+        ，  、  ；  。  ？  ！  ,  ;  ?  !
+    The candidate closest to the text midpoint is chosen, subject to a
+    minimum 4-character margin on each side.
+    """
+    _SPLIT_CHARS = '，、；。？！,;?!'
+
+    def _ms(ts: str) -> int:
+        h, rest = ts.split(':', 1)
+        mi, rest2 = rest.split(':', 1)
+        s, ms = rest2.split(',')
+        return int(h) * 3_600_000 + int(mi) * 60_000 + int(s) * 1_000 + int(ms)
+
+    def _fmt(total_ms: int) -> str:
+        ms = total_ms % 1_000
+        total_s = total_ms // 1_000
+        s = total_s % 60
+        total_m = total_s // 60
+        m = total_m % 60
+        h = total_m // 60
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    def _best_split(text: str) -> int | None:
+        """Return the index after the best punctuation split point, or None."""
+        if len(text) <= max_chars:
+            return None
+        mid = len(text) // 2
+        candidates = [i + 1 for i, c in enumerate(text) if c in _SPLIT_CHARS]
+        valid = [p for p in candidates if 4 <= p <= len(text) - 4]
+        if not valid:
+            return None
+        return min(valid, key=lambda p: abs(p - mid))
+
+    blocks: list[list[str]] = []
+    for raw in re.split(r'\n\n+', srt_text.strip()):
+        parts = raw.strip().split('\n', 2)
+        if len(parts) < 3:
+            continue
+        m = re.match(r'(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})', parts[1])
+        if m:
+            blocks.append([m.group(1), m.group(2), parts[2].strip()])
+
+    out: list[tuple[str, str, str]] = []
+    n_split = 0
+    for start, end, text in blocks:
+        flat = text.replace('\n', '')
+        split_pos = _best_split(flat)
+        if split_pos is None:
+            out.append((start, end, flat))
+            continue
+
+        start_ms = _ms(start)
+        end_ms   = _ms(end)
+        dur_ms   = end_ms - start_ms
+
+        part_a = flat[:split_pos].strip()
+        part_b = flat[split_pos:].strip()
+        if not part_a or not part_b:
+            out.append((start, end, flat))
+            continue
+
+        mid_ms = start_ms + int(dur_ms * len(part_a) / len(flat))
+
+        if (mid_ms - start_ms) < min_dur_ms or (end_ms - mid_ms) < min_dur_ms:
+            out.append((start, end, flat))
+            continue
+
+        out.append((start, _fmt(mid_ms), part_a))
+        out.append((_fmt(mid_ms), end, part_b))
+        n_split += 1
+
+    if n_split:
+        logger.debug("_split_long_segments: split %d long segment(s)", n_split)
+
+    lines: list[str] = []
+    for idx, (start, end, text) in enumerate(out, 1):
         lines.extend([str(idx), f"{start} --> {end}", text, ''])
     if lines and lines[-1] == '':
         lines.pop()
