@@ -12,6 +12,13 @@ CHARACTER PRONOUNS (apply these consistently — never swap he/she for any chara
 {{ pronoun_map_json }}
 {% endif %}
 
+NAME CARD PRESERVATION — some entries begin with a character name card in the form [Title - Name]:
+- This was converted from Chinese {头衔 姓名}： by the skeleton translator
+- PRESERVE the [Title - Name]: prefix exactly — do not alter it, reformat it, or translate it again
+- Polish ONLY the dialogue text that follows the name card
+- Example input:  [City's Richest - Huo Jianhua]: i want to give you two buildings
+- Example output: [City's Richest - Huo Jianhua]: I want to donate two buildings to you.
+
 POLISHING RULES:
 1. Return a JSON array with the EXACT SAME number of elements as the input. NEVER add, remove, or merge entries.
 2. Each element: {"idx": <same integer as input>, "text": "<polished English>"}

@@ -330,6 +330,28 @@ class ShortDramaPipeline:
         # ── Stage 4: LLM Refinement ────────────────────────────────────────
         self._phase_execution(episodes, meta)
 
+        # ── Review pause (zh source only) ─────────────────────────────────
+        source_lang = self._cfg.get("pipeline", {}).get("source_language", "zh")
+        if source_lang == "zh":
+            marker = self._meta_dir / "REVIEW_PENDING"
+            marker.write_text(
+                "CN subtitles are ready for operator review.\n"
+                "Edit files in the cn/ folder, then run:\n"
+                f"  python pipeline.py \"<drama_name>\" --post-review\n",
+                encoding="utf-8",
+            )
+            logger.info(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            logger.info("⏸  PAUSED — CN subtitles ready for operator review.")
+            logger.info("   Folder : %s", self._output_dir / "cn")
+            logger.info("   Format : {头衔 姓名}：台词  (name cards, optional)")
+            logger.info("   Resume : python pipeline.py \"<drama>\" --post-review")
+            logger.info(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            return
+
         # ── Stage 4.5: Auto-Term Anchoring ────────────────────────────────
         from src.intelligence.term_anchoring import TermAnchoring
         TermAnchoring(self._cfg).build()
@@ -984,6 +1006,16 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--post-review",
+        action="store_true",
+        help=(
+            "Resume pipeline after operator CN subtitle review. "
+            "Runs Stage 4.5 (term anchoring) → 5 (analysis) → 5.5 (translation) → 6 (creatives). "
+            "Reads corrected cn/ SRTs as translation source. "
+            "Only valid for same_lang (zh) dramas."
+        ),
+    )
+    parser.add_argument(
         "--yes", "-y",
         action="store_true",
         help="Skip the dry-run confirmation prompt (for CI / scripted runs)",
@@ -1101,6 +1133,85 @@ def _run_translation_only(cfg: dict, episode_filter: Optional[list[str]] = None)
     )
 
 
+def _run_post_review_only(cfg: dict) -> None:
+    """
+    Resume pipeline after operator CN subtitle review (zh source dramas only).
+
+    Clears REVIEW_PENDING marker, then runs:
+      Stage 4.5  — Auto-Term Anchoring (builds en_terms.json from reviewed cn/ SRTs)
+      Stage 5    — Drama Rhythm Analysis
+      Stage 5.5  — Translation (reads corrected cn/ SRTs as source)
+      Stage 6    — Creatives
+    """
+    from src.utils.checkpoint import Checkpoint
+    from src.intelligence.term_anchoring import TermAnchoring
+    from src.intelligence.cost_auditor import CostAuditor
+
+    cache_dir  = Path(cfg["paths"]["cache_dir"])
+    meta_dir   = Path(cfg["paths"]["meta_dir"])
+    output_dir = Path(cfg["paths"]["output_dir"])
+
+    # Clear review marker
+    marker = meta_dir / "REVIEW_PENDING"
+    if marker.exists():
+        marker.unlink()
+        logger.info("REVIEW_PENDING cleared — resuming post-review stages")
+
+    # Discover refined episode IDs
+    aligned_dir = cache_dir / "aligned"
+    if not aligned_dir.exists():
+        logger.error("Aligned cache not found at %s — run the full pipeline first", aligned_dir)
+        sys.exit(1)
+
+    ckpt = Checkpoint(cache_dir / "checkpoint.json")
+    all_aligned = sorted(
+        aligned_dir.glob("*_aligned.json"),
+        key=lambda p: [
+            int(x) if x.isdigit() else x.lower()
+            for x in re.split(r"(\d+)", p.stem)
+        ],
+    )
+    episode_ids = [p.stem.replace("_aligned", "") for p in all_aligned]
+    episode_ids = [ep for ep in episode_ids if ckpt.is_at_least(ep, "refined")]
+
+    if not episode_ids:
+        logger.error("No refined episodes found — run the main pipeline first")
+        sys.exit(1)
+
+    meta_path = meta_dir / "meta.json"
+    meta = {}
+    if meta_path.exists():
+        with meta_path.open(encoding="utf-8") as f:
+            meta = json.load(f)
+
+    logger.info(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    logger.info("▶ Post-review pipeline — %d episode(s)", len(episode_ids))
+    logger.info(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    # Stage 4.5 — Term Anchoring (re-reads reviewed cn/ SRTs for sampling)
+    TermAnchoring(cfg).build()
+
+    # Stage 5 — Drama Rhythm Analysis + Stage 6 via pipeline instance
+    pipeline = ShortDramaPipeline(cfg)
+    pipeline._phase_rhythm_analysis(episode_ids, meta)
+
+    # Stage 5.5 — Translation (reads corrected cn/ SRTs via _load_aligned_segs)
+    _run_translation_only(cfg)
+
+    # Stage 6 — Creatives
+    pipeline._phase_creatives()
+
+    # FinOps
+    from src.intelligence.translation_matrix import TranslationMatrix
+    from src.intelligence.cost_auditor import CostAuditor as CA
+    matrix_tmp = TranslationMatrix.__new__(TranslationMatrix)
+    logger.info("Post-review stages complete.  Outputs → %s", output_dir)
+
+
 def _run_paywall_report(cfg: dict) -> None:
     """
     Generate the AI paywall strategy report from drama_structure_graph.json.
@@ -1184,6 +1295,11 @@ def _run_single(
     # ── Paywall report shortcut ───────────────────────────────────────────
     if args.paywall_report:
         _run_paywall_report(cfg)
+        return
+
+    # ── Post-review shortcut (zh dramas only) ────────────────────────────
+    if args.post_review:
+        _run_post_review_only(cfg)
         return
 
     # ── Translation-only shortcut ─────────────────────────────────────────

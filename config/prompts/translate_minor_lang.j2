@@ -14,6 +14,11 @@ CHARACTER PRONOUNS (apply the grammatically correct {{ target_language }} pronou
 {{ pronoun_map_json }}
 {% endif %}
 
+NAME CARD FORMAT — some entries begin with an English name card in the form [Title - Name]:
+- PRESERVE the [Title - Name]: prefix exactly in your {{ target_language }} output — keep it in English
+- Translate ONLY the dialogue text that follows the name card
+- Example (French): [City's Richest - Huo Jianhua]: Hello  →  [City's Richest - Huo Jianhua]: Bonjour
+
 TRANSLATION RULES:
 1. Return a JSON array with the EXACT SAME number of elements as the input. NEVER add, remove, or merge entries.
 2. Each element: {"idx": <same integer as input>, "text": "<{{ target_language }} translation>"}

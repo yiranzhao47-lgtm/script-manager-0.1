@@ -15,6 +15,14 @@ CHARACTER PRONOUNS (MANDATORY — use these pronouns consistently, never swap he
 {{ pronoun_map_json }}
 {% endif %}
 
+NAME CARD FORMAT — some subtitles begin with a character name card in the form {头衔 姓名}：
+- Detect this pattern: text starting with { ... }：(Chinese full-width colon)
+- Convert to English bracket format: [English Title - English Name]:
+- Translate the title portion (头衔) into natural English; use the CHARACTER NAME MAPPING for the name
+- Example: {海城首富 霍建华}：你好  →  [City's Richest - Huo Jianhua]: Hello
+- The name card and the colon+space are PART of the text field — do not place them in a separate entry
+- If no name card is present, translate normally
+
 TRANSLATION RULES:
 1. Return a JSON array with the EXACT SAME number of elements as the input. NEVER add, remove, or merge entries.
 2. Each element: {"idx": <same integer as input>, "text": "<English translation>"}
