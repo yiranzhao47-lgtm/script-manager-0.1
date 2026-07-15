@@ -150,6 +150,38 @@ def _discover_dramas(raw_base: Path) -> list[str]:
     return sorted(d.name for d in raw_base.iterdir() if d.is_dir())
 
 
+def _is_drama_review_ready(drama_name: str) -> bool:
+    """
+    Return True if a zh drama has completed Stage 1-4 AND the operator has
+    cleared the review gate (REVIEW_PENDING deleted), but Stage 4.5-6 has not
+    yet run (translation cache absent or empty).
+
+    Used by ``--all --post-review`` to select dramas ready for downstream stages.
+    """
+    # Must NOT be pending review
+    if (_ROOT / "data" / "meta" / drama_name / "REVIEW_PENDING").exists():
+        return False
+    # Must have at least some refined episodes
+    ckpt_path = _ROOT / "data" / "cache" / drama_name / "checkpoint.json"
+    if not ckpt_path.exists():
+        return False
+    try:
+        with ckpt_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        from src.utils.checkpoint import _STATE_RANK
+        refined_rank = _STATE_RANK.get("refined", 4)
+        episodes: dict = data.get("episodes", {})
+        if not any(_STATE_RANK.get(s, 0) >= refined_rank for s in episodes.values()):
+            return False
+        # Skip if Stage 5.5 translation already produced output
+        trans_cache = _ROOT / "data" / "cache" / drama_name / "translation"
+        if trans_cache.exists() and any(trans_cache.iterdir()):
+            return False
+        return True
+    except (json.JSONDecodeError, OSError, ImportError):
+        return False
+
+
 def _is_drama_complete(drama_name: str) -> bool:
     """Return True if the drama's checkpoint shows all pipeline stages done."""
     ckpt_path = _ROOT / "data" / "cache" / drama_name / "checkpoint.json"
@@ -940,6 +972,16 @@ Examples:
   # Translate already-refined episodes (no GPU required):
   python pipeline.py "dollar baby" --translate-only
   python pipeline.py "dollar baby" --translate-only --episodes 01,02,05
+
+  # CN subtitle review workflow (zh dramas pause after Stage 4):
+  python pipeline.py "drama A"          # runs Stage 1-4, pauses → REVIEW_PENDING
+  # operator reviews data/output/drama A/cn/, deletes REVIEW_PENDING when done
+  python pipeline.py "drama A" --post-review  # runs Stage 4.5-6
+
+  # Batch version — process all dramas, then resume reviewed ones later:
+  python pipeline.py --all              # Stage 1-4 for all; zh dramas pause
+  # operator reviews each drama, deletes its REVIEW_PENDING
+  python pipeline.py --all --post-review  # Stage 4.5-6 for all reviewed dramas
         """,
     )
     parser.add_argument(
@@ -1299,6 +1341,14 @@ def _run_single(
 
     # ── Post-review shortcut (zh dramas only) ────────────────────────────
     if args.post_review:
+        review_marker = Path(cfg["paths"]["meta_dir"]) / "REVIEW_PENDING"
+        if review_marker.exists():
+            logger.warning(
+                "Drama '%s' — REVIEW_PENDING exists, skipping. "
+                "Finish CN review and delete the marker to proceed.",
+                drama_name,
+            )
+            return
         _run_post_review_only(cfg)
         return
 
@@ -1349,10 +1399,44 @@ def main() -> None:
             logger.error("No drama directories found in %s", raw_base)
             sys.exit(1)
         logger.info("--all: found %d drama(s): %s", len(dramas), dramas)
+
+        # ── --all --post-review: run Stage 4.5-6 on reviewed zh dramas ──────
+        if args.post_review:
+            ready    = [d for d in dramas if _is_drama_review_ready(d)]
+            awaiting = [
+                d for d in dramas
+                if (_ROOT / "data" / "meta" / d / "REVIEW_PENDING").exists()
+            ]
+            if awaiting:
+                logger.info(
+                    "--all --post-review: %d drama(s) still awaiting CN review "
+                    "(REVIEW_PENDING): %s",
+                    len(awaiting), awaiting,
+                )
+            if not ready:
+                logger.info(
+                    "--all --post-review: no dramas ready for post-review stages — nothing to do"
+                )
+                return
+            logger.info(
+                "--all --post-review: %d drama(s) ready → running Stage 4.5-6: %s",
+                len(ready), ready,
+            )
+            for drama_name in ready:
+                logger.info(
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                )
+                logger.info("Post-review: %s", drama_name)
+                _run_single(drama_name, base_cfg, args, cfg_path)
+            return
+
+        # ── --all (normal): run Stage 1-4 on unprocessed dramas ─────────────
         pending = [d for d in dramas if not _is_drama_complete(d)]
         skipped = [d for d in dramas if _is_drama_complete(d)]
         if skipped:
-            logger.info("--all: skipping %d already-complete drama(s): %s", len(skipped), skipped)
+            logger.info(
+                "--all: skipping %d already-complete drama(s): %s", len(skipped), skipped
+            )
         if not pending:
             logger.info("--all: all dramas already complete — nothing to do")
             return
