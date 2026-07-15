@@ -574,7 +574,8 @@ def detect_audio_language(video_path: Path) -> str:
         audio_30s = audio[: 30 * 16000]
 
         model = _get_whisper_tiny()
-        language, probability = model.detect_language(audio_30s)
+        language, *_rest = model.detect_language(audio_30s)
+        probability = _rest[0] if _rest and isinstance(_rest[0], float) else 1.0
         logger.info(
             "Audio language detected: %s (prob=%.2f)  file=%s",
             language, probability, video_path.name,
