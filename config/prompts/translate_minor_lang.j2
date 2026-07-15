@@ -9,6 +9,11 @@ IMPORTANT: Translate ONLY from the English text provided below. Do NOT introduce
 CHARACTER NAME MAPPING (keep English names as-is — do NOT transliterate or localize character names into {{ target_language }}):
 {{ char_map_json }}
 
+{% if pronoun_map_json and pronoun_map_json != '{}' %}
+CHARACTER PRONOUNS (apply the grammatically correct {{ target_language }} pronoun for each character — never swap gender):
+{{ pronoun_map_json }}
+{% endif %}
+
 TRANSLATION RULES:
 1. Return a JSON array with the EXACT SAME number of elements as the input. NEVER add, remove, or merge entries.
 2. Each element: {"idx": <same integer as input>, "text": "<{{ target_language }} translation>"}

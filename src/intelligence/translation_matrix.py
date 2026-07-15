@@ -157,11 +157,19 @@ class TranslationMatrix:
             keep_trailing_newline=True,
         )
 
-        # Stage 4.5 anchored terms (loaded once; shared by char_map + glossary)
+        # Stage 4.5 anchored terms (loaded once; shared by char_map, glossary, pronoun_map, genre)
         self._en_terms: dict = self._load_en_terms()
 
         # Character name map (zh aliases → English canonical name)
         self._char_map: dict[str, str] = self._build_char_map()
+
+        # Pronoun map (English name → pronoun) for gender-consistent translation
+        self._pronoun_map: dict[str, str] = self._build_pronoun_map()
+
+        # Genre context string for tone-calibrated prompt injection
+        self._genre_description: str = self._en_terms.get(
+            "genre_description", "Chinese short drama"
+        )
 
         # Glossary: genre file merged with Stage 4.5 anchored terms
         self._glossary: dict[str, str] = self._load_glossary(glossary_path_str)
@@ -349,6 +357,7 @@ class TranslationMatrix:
             episode_number=ep_id,
             char_map_json=json.dumps(self._char_map, ensure_ascii=False, indent=2),
             glossary_json=json.dumps(self._glossary, ensure_ascii=False, indent=2),
+            pronoun_map_json=json.dumps(self._pronoun_map, ensure_ascii=False, indent=2),
             segments_json=json.dumps(input_arr, ensure_ascii=False, indent=2),
         )
         return "You are a professional subtitle translator.", combined
@@ -447,6 +456,8 @@ class TranslationMatrix:
         user = tmpl.render(
             episode_number=ep_id,
             char_map_json=json.dumps(self._char_map, ensure_ascii=False, indent=2),
+            pronoun_map_json=json.dumps(self._pronoun_map, ensure_ascii=False, indent=2),
+            genre_context=self._genre_description,
             segments_json=json.dumps(input_arr, ensure_ascii=False, indent=2),
         )
         system = "You are a US English subtitle polisher for short drama streaming content."
@@ -548,6 +559,7 @@ class TranslationMatrix:
             episode_number=ep_id,
             target_language=lang_name,
             char_map_json=json.dumps(self._char_map, ensure_ascii=False, indent=2),
+            pronoun_map_json=json.dumps(self._pronoun_map, ensure_ascii=False, indent=2),
             segments_json=json.dumps(input_arr, ensure_ascii=False, indent=2),
         )
         system = f"You are a professional subtitle translator specializing in {lang_name}."
@@ -1140,6 +1152,18 @@ class TranslationMatrix:
 
     def _en_terms_chars(self) -> dict[str, dict]:
         return self._en_terms.get("characters", {})
+
+    def _build_pronoun_map(self) -> dict[str, str]:
+        """Build {en_name: pronoun} from Stage 4.5 en_terms.json characters."""
+        result: dict[str, str] = {}
+        for info in self._en_terms_chars().values():
+            en_name = info.get("en_name", "")
+            pronoun = info.get("pronoun", "")
+            if en_name and pronoun:
+                result[en_name] = pronoun
+        if result:
+            logger.info("Pronoun map built — %d character(s)", len(result))
+        return result
 
     def _build_char_map(self) -> dict[str, str]:
         """

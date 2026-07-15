@@ -31,6 +31,7 @@ Use these lines to identify world-specific proper nouns (locations, organization
 Return ONLY a JSON object with this structure — no extra text, no markdown fences:
 
 {
+  "genre_description": "<one sentence describing the genre and setting in English>",
   "characters": {
     "<zh_canonical>": {
       "en_name": "<English name>",
@@ -42,6 +43,14 @@ Return ONLY a JSON object with this structure — no extra text, no markdown fen
     "<chinese_term>": "<English equivalent>"
   }
 }
+
+Rules for genre_description:
+- Write one concise sentence describing the genre and world-setting, e.g.:
+  "Chinese military sci-fi short drama set in a post-apocalyptic mecha civilization."
+  "Chinese campus romance short drama with competitive academic rivalry."
+  "Chinese fantasy xianxia short drama set in an immortal cultivation world."
+- Base it on the drama title and sample dialogue — do NOT guess.
+- This description will be injected verbatim into translation prompts to set tone and register.
 
 Rules for characters:
 - If the character has an established Western name shown in the aliases list (marked ★), use that as the first name and keep the family name in pinyin.

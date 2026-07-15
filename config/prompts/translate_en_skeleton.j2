@@ -10,6 +10,11 @@ DOMAIN GLOSSARY (MANDATORY — use these translations verbatim):
 {{ glossary_json }}
 {% endif %}
 
+{% if pronoun_map_json and pronoun_map_json != '{}' %}
+CHARACTER PRONOUNS (MANDATORY — use these pronouns consistently, never swap he/she):
+{{ pronoun_map_json }}
+{% endif %}
+
 TRANSLATION RULES:
 1. Return a JSON array with the EXACT SAME number of elements as the input. NEVER add, remove, or merge entries.
 2. Each element: {"idx": <same integer as input>, "text": "<English translation>"}
