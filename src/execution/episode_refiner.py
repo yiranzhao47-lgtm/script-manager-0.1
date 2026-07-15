@@ -221,7 +221,7 @@ class EpisodeRefiner:
 
         if valid:
             logger.info("EpisodeRefiner: %s — SRT valid on first attempt", episode_id)
-            _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(raw)))))
+            _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(_filter_corrupted_placeholders(raw))))))
             return str(out_path)
 
         # ── LLM call #2: correction retry ─────────────────────────────────
@@ -243,7 +243,7 @@ class EpisodeRefiner:
 
         if valid2:
             logger.info("EpisodeRefiner: %s — SRT valid after correction retry", episode_id)
-            _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(raw2)))))
+            _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(_filter_corrupted_placeholders(raw2))))))
             return str(out_path)
 
         # ── Both attempts failed: fallback ────────────────────────────────
@@ -451,7 +451,7 @@ class EpisodeRefiner:
         """
         fallback_srt = self._assemble_fallback_srt(segments)
         out_path = self._cn_dir / f"{episode_id}.srt"
-        _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(fallback_srt)))))
+        _atomic_write(out_path, _clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(_filter_corrupted_placeholders(fallback_srt))))))
 
         self._append_validation_report(episode_id, reason)
         logger.warning(
@@ -545,6 +545,31 @@ class EpisodeRefiner:
 # ══════════════════════════════════════════════════════════════════════════════
 #  Utility
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+_CORRUPTED_RE = re.compile(r"^\[corrupted[^\]]*\]$", re.IGNORECASE)
+
+
+def _filter_corrupted_placeholders(srt_text: str) -> str:
+    """Drop subtitle entries whose text is an OCR-failure placeholder."""
+    blocks = re.split(r"\n{2,}", srt_text.strip())
+    kept: list[str] = []
+    dropped = 0
+    for block in blocks:
+        lines = block.strip().splitlines()
+        text_lines = [l for l in lines[2:] if l.strip()] if len(lines) >= 3 else []
+        if text_lines and all(_CORRUPTED_RE.match(l.strip()) for l in text_lines):
+            dropped += 1
+        else:
+            kept.append(block)
+    if dropped:
+        logger.debug("_filter_corrupted_placeholders: removed %d placeholder entry(s)", dropped)
+    # Renumber
+    out: list[str] = []
+    for idx, block in enumerate(kept, 1):
+        lines = block.strip().splitlines()
+        out.append("\n".join([str(idx)] + lines[1:]))
+    return "\n\n".join(out) + "\n" if out else ""
 
 
 def _merge_artifact_fragments(srt_text: str) -> str:

@@ -157,10 +157,13 @@ class TranslationMatrix:
             keep_trailing_newline=True,
         )
 
+        # Stage 4.5 anchored terms (loaded once; shared by char_map + glossary)
+        self._en_terms: dict = self._load_en_terms()
+
         # Character name map (zh aliases → English canonical name)
         self._char_map: dict[str, str] = self._build_char_map()
 
-        # Glossary (domain-specific terms) — graceful fallback if file missing
+        # Glossary: genre file merged with Stage 4.5 anchored terms
         self._glossary: dict[str, str] = self._load_glossary(glossary_path_str)
 
         # LLM clients
@@ -1117,12 +1120,37 @@ class TranslationMatrix:
     #  Character map + glossary                                             #
     # ------------------------------------------------------------------ #
 
+    def _load_en_terms(self) -> dict:
+        """Load Stage 4.5 en_terms.json once at init; return empty dict if absent."""
+        path = self._meta_dir / "en_terms.json"
+        if not path.exists():
+            return {}
+        try:
+            with path.open(encoding="utf-8") as f:
+                data = json.load(f)
+            logger.info(
+                "en_terms.json loaded — %d character(s), %d glossary term(s)",
+                len(data.get("characters", {})),
+                len(data.get("glossary", {})),
+            )
+            return data
+        except Exception as exc:
+            logger.warning("Failed to load en_terms.json: %s — ignoring", exc)
+            return {}
+
+    def _en_terms_chars(self) -> dict[str, dict]:
+        return self._en_terms.get("characters", {})
+
     def _build_char_map(self) -> dict[str, str]:
         """
         Build zh-name → English-name mapping.
 
-        Priority: char_name_en_override.json (Western names) > meta.json canonical_en (pinyin).
-        Only CJK aliases are added to the map — English aliases like "Ethan" are skipped
+        Priority (highest → lowest):
+          1. char_name_en_override.json  (manually curated Western names)
+          2. en_terms.json characters    (Stage 4.5 LLM-anchored names)
+          3. meta.json canonical_en      (auto-generated pinyin, often null)
+
+        Only CJK aliases are added — English aliases like "Ethan" are skipped
         to prevent them from being remapped to a different canonical name.
         """
         meta_path = self._meta_dir / "meta.json"
@@ -1137,7 +1165,7 @@ class TranslationMatrix:
         with meta_path.open(encoding="utf-8") as f:
             meta = json.load(f)
 
-        # Load Western-name overrides if available
+        # Priority 1: manually curated Western-name overrides
         override: dict[str, str] = {}
         override_path = self._meta_dir / "char_name_en_override.json"
         if override_path.exists():
@@ -1151,10 +1179,16 @@ class TranslationMatrix:
             except Exception as exc:
                 logger.warning("Failed to load char_name_en_override.json: %s", exc)
 
+        # Priority 2: Stage 4.5 anchored names
+        en_terms_chars: dict[str, dict] = self._en_terms_chars()
+
         char_map: dict[str, str] = {}
         for canonical_zh, entry in meta.get("characters", {}).items():
-            # Prefer Western-name override; fall back to pinyin canonical_en
-            en_name = override.get(canonical_zh) or entry.get("canonical_en")
+            en_name = (
+                override.get(canonical_zh)
+                or (en_terms_chars.get(canonical_zh) or {}).get("en_name")
+                or entry.get("canonical_en")
+            )
             if not en_name:
                 continue
             char_map[canonical_zh] = en_name
@@ -1265,22 +1299,32 @@ class TranslationMatrix:
 
     def _load_glossary(self, path_str: str) -> dict[str, str]:
         """
-        Load genre-specific glossary from *path_str*.
-        Returns empty dict (silently) if the file does not exist.
+        Load genre-specific glossary from *path_str*, then merge in any terms
+        from Stage 4.5 en_terms.json (genre file takes precedence if same key).
+        Returns empty dict (silently) if no file exists.
         """
+        # Stage 4.5 terms as the base layer (lowest priority)
+        terms: dict[str, str] = dict(self._en_terms.get("glossary", {}))
+        if terms:
+            logger.info("en_terms.json glossary — %d base term(s)", len(terms))
+
         glossary_path = Path(path_str)
         if not glossary_path.exists():
             logger.debug(
-                "Genre glossary not found at %s — translation proceeds without it",
+                "Genre glossary not found at %s — using en_terms glossary only",
                 glossary_path,
             )
-            return {}
+            return terms
 
         try:
             with glossary_path.open(encoding="utf-8") as f:
                 data = json.load(f)
-            terms = data if isinstance(data, dict) else data.get("terms", {})
-            logger.info("Genre glossary loaded — %d term(s) from %s", len(terms), glossary_path)
+            genre_terms = data if isinstance(data, dict) else data.get("terms", {})
+            terms.update(genre_terms)  # genre file overrides en_terms on conflict
+            logger.info(
+                "Genre glossary loaded — %d term(s) from %s (total: %d)",
+                len(genre_terms), glossary_path, len(terms),
+            )
             return terms
         except Exception as exc:
             logger.warning(

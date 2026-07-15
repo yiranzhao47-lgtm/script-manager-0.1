@@ -330,6 +330,10 @@ class ShortDramaPipeline:
         # ── Stage 4: LLM Refinement ────────────────────────────────────────
         self._phase_execution(episodes, meta)
 
+        # ── Stage 4.5: Auto-Term Anchoring ────────────────────────────────
+        from src.intelligence.term_anchoring import TermAnchoring
+        TermAnchoring(self._cfg).build()
+
         # ── Done ──────────────────────────────────────────────────────────
         logger.info(
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1067,6 +1071,10 @@ def _run_translation_only(cfg: dict, episode_filter: Optional[list[str]] = None)
     logger.info(
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
+
+    # Stage 4.5: build en_terms.json if not yet present (idempotent)
+    from src.intelligence.term_anchoring import TermAnchoring
+    TermAnchoring(cfg).build()
 
     matrix = TranslationMatrix(cfg)
     matrix.run_all(episode_ids)

@@ -1,0 +1,55 @@
+You are a drama localization specialist. Your task is to establish canonical English terminology for a Chinese drama BEFORE translation begins. This ensures every episode uses identical names and terms.
+
+## Drama Context
+Title/folder: {{ drama_title }}
+Genre/setting: {{ genre_context }}
+Source language: Chinese (Mandarin)
+{% if source_language is defined and source_language == "en" %}
+NOTE: The drama has English subtitles as source — focus on glossary terms only.
+{% endif %}
+
+## Characters in This Drama
+The following characters appear in the drama. For each, assign:
+- `en_name`: canonical English rendering (Western first name if appropriate, else accurate pinyin with tones stripped)
+- `gender`: "male" | "female" | "unknown"
+- `pronoun`: "he" | "she" | "they"
+
+Infer gender from:
+1. Aliases/nicknames listed (e.g. "大小姐" means "Young Miss" → female)
+2. The drama title or genre context
+3. Chinese name conventions (e.g. 薇/娜/芸/琳 are typically female)
+
+Character list:
+{{ characters_json }}
+
+## Sample Dialogue (first few episodes)
+Use these lines to identify world-specific proper nouns (locations, organizations, technology terms, rank/class systems, mythological names) that should be translated consistently:
+
+{{ srt_sample }}
+
+## Output Format
+Return ONLY a JSON object with this structure — no extra text, no markdown fences:
+
+{
+  "characters": {
+    "<zh_canonical>": {
+      "en_name": "<English name>",
+      "gender": "male|female|unknown",
+      "pronoun": "he|she|they"
+    }
+  },
+  "glossary": {
+    "<chinese_term>": "<English equivalent>"
+  }
+}
+
+Rules for characters:
+- If the character has an established Western name shown in the aliases list (marked ★), use that as the first name and keep the family name in pinyin.
+- For purely Chinese names with no Western equivalent, use accurate pinyin (e.g. 王天威 → "Wang Tianwei").
+- The `en_name` must be unique across all characters.
+
+Rules for glossary:
+- Include ONLY proper nouns specific to this drama's world: locations, organizations, ranks/titles, technology/system names, mythological creatures/terms.
+- Do NOT include common Chinese words or generic titles (先生, 老师, etc.).
+- Use the most widely recognized English equivalent for mythological terms (e.g. 麒麟 → "Qilin", not "Kirin").
+- Keep glossary concise — aim for 10–30 high-value terms.
