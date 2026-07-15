@@ -90,6 +90,86 @@ def _normalise_entry(canonical: str, raw: dict) -> dict:
     }
 
 
+def _try_recover_truncated_json(text: str) -> "dict | None":
+    """
+    Extract complete character entries from a truncated JSON response.
+    Scans character-by-character; stops at the first incomplete entry.
+    Returns {"characters": {...}} or None if nothing could be recovered.
+    """
+    import re
+
+    m = re.search(r'"characters"\s*:\s*\{', text)
+    if not m:
+        return None
+
+    pos = m.end()
+    n = len(text)
+    characters: dict = {}
+
+    while pos < n and text[pos] in " \t\n\r":
+        pos += 1
+
+    while pos < n and text[pos] == '"':
+        # Parse canonical name
+        key_start = pos + 1
+        j = key_start
+        esc = False
+        while j < n:
+            if esc:
+                esc = False
+            elif text[j] == "\\":
+                esc = True
+            elif text[j] == '"':
+                break
+            j += 1
+        if j >= n:
+            break
+        canonical = text[key_start:j]
+        pos = j + 1
+
+        # Skip ": "
+        while pos < n and text[pos] in " \t\n\r:":
+            pos += 1
+        if pos >= n or text[pos] != "{":
+            break
+
+        # Brace-track the value object
+        depth = 0
+        k = pos
+        in_str = False
+        esc = False
+        while k < n:
+            ch = text[k]
+            if esc:
+                esc = False
+            elif ch == "\\" and in_str:
+                esc = True
+            elif ch == '"':
+                in_str = not in_str
+            elif not in_str:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            k += 1
+
+        if depth != 0:
+            break  # Incomplete entry — stop here
+
+        try:
+            characters[canonical] = json.loads(text[pos : k + 1])
+        except json.JSONDecodeError:
+            break
+
+        pos = k + 1
+        while pos < n and text[pos] in " \t\n\r,":
+            pos += 1
+
+    return {"characters": characters} if characters else None
+
+
 # ══════���══════════════════════════��═══════════════════════════════���════════════
 #  MapPhase
 # ══════════════════════��═════════════════════════════════��═════════════════════
@@ -209,7 +289,7 @@ class MapPhase:
                     "no explanations, no markdown."
                 ),
                 user=user_prompt,
-                max_tokens=4000,
+                max_tokens=8192,
                 module_name="Map_Extract",
             )
         except LLMCallError as exc:
@@ -331,17 +411,26 @@ class MapPhase:
     def _parse_response(self, text: str, batch_idx: int) -> dict:
         """
         Parse LLM JSON response into a normalised characters dict.
-        Raises ValueError on unrecoverable parse failure.
+        Falls back to partial recovery if the response was truncated.
+        Raises ValueError only when nothing can be recovered.
         """
         from src.utils.llm_client import extract_json
 
+        data = None
         try:
             data = extract_json(text)
-        except ValueError as exc:
-            raise ValueError(
-                f"Map batch {batch_idx:02d}: LLM returned non-JSON.  "
-                f"Raw (first 400): {text[:400]!r}"
-            ) from exc
+        except ValueError:
+            data = _try_recover_truncated_json(text)
+            if data is not None:
+                logger.warning(
+                    "Map batch %02d: truncated response — recovered %d character(s)",
+                    batch_idx, len(data.get("characters", {})),
+                )
+            else:
+                raise ValueError(
+                    f"Map batch {batch_idx:02d}: LLM returned non-JSON.  "
+                    f"Raw (first 400): {text[:400]!r}"
+                )
 
         raw_chars: dict = data.get("characters", {})
         if not isinstance(raw_chars, dict):

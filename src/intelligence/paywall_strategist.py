@@ -50,7 +50,7 @@ class PaywallStrategist:
         ep_end   = int(paywall_cfg.get("scene_ep_range_end",   _SCENE_EP_RANGE_END_DEFAULT))
         self._scene_ep_range = range(ep_start, ep_end)
 
-        prompts_dir = Path("config/prompts")
+        prompts_dir = Path(__file__).resolve().parent.parent.parent / "config" / "prompts"
         self._jinja = Environment(
             loader=FileSystemLoader(str(prompts_dir)),
             autoescape=False,

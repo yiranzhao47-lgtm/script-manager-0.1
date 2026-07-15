@@ -349,13 +349,18 @@ class SubtitleEraser:
             logger.error(
                 "SubtitleEraser: encode pipe broke after %d frames", n_frames
             )
+            decode_proc.terminate()
         finally:
             try:
                 encode_proc.stdin.close()
             except OSError:
                 pass
 
-        decode_proc.wait()
+        try:
+            decode_proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            decode_proc.kill()
+            decode_proc.wait()
         rc = encode_proc.wait()
 
         elapsed   = time.monotonic() - t0

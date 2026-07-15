@@ -150,7 +150,7 @@ class TranslationMatrix:
         self._trans_out.mkdir(parents=True, exist_ok=True)
 
         # Jinja2 environment
-        prompts_dir = Path("config/prompts")
+        prompts_dir = Path(__file__).resolve().parent.parent.parent / "config" / "prompts"
         self._jinja = Environment(
             loader=FileSystemLoader(str(prompts_dir)),
             autoescape=False,

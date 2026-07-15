@@ -664,7 +664,12 @@ def _merge_short_fragments(srt_text: str) -> str:
             dur = _ms(end) - _ms(start)
             if dur < 300 and i + 1 < len(blocks):
                 n_start, n_end, n_text = blocks[i + 1]
-                merged_text = text if n_text == text else text + n_text
+                if n_text == text:
+                    merged_text = text
+                else:
+                    # Add a space between ASCII words (EN ASR fragments) but not CJK
+                    sep = " " if text and n_text and text[-1].isascii() and n_text[0].isascii() else ""
+                    merged_text = text + sep + n_text
                 new_blocks.append([start, n_end, merged_text])
                 i += 2
                 changed = True

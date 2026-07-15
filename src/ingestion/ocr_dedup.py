@@ -142,11 +142,12 @@ class _Active:
                       norm: str, conf: float) -> None:
         """Update with a normal frame that matches this segment."""
         self.end = frame_time + interval
+        old_avg = self.conf_sum / max(self.normal_count, 1)
         self.conf_sum += conf
         self.normal_count += 1
         self.total_count += 1
         # Keep whichever text has higher confidence as the canonical raw_text
-        if conf > (self.conf_sum / max(self.normal_count, 1)):
+        if conf > old_avg:
             self.raw_text = raw
             self.normalized_text = norm
 

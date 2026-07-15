@@ -376,9 +376,17 @@ class ProjectInitializer:
         ocr_dir     = self._cache_dir / "ocr"
         aligned_dir = self._cache_dir / "aligned"
 
+        source_lang = self._cfg.get("pipeline", {}).get("source_language", "zh")
+        srt_subdir = "cn" if source_lang == "zh" else source_lang
+        srt_dir = self._output_dir / srt_subdir
+
         healed: list[str] = []
         for ep_id, state in list(episodes.items()):
-            if state == "aligned":
+            if state in ("refined", "complete"):
+                if not (srt_dir / f"{ep_id}.srt").exists():
+                    episodes[ep_id] = "aligned"
+                    healed.append(f"{ep_id}:{state}→aligned")
+            elif state == "aligned":
                 if not (aligned_dir / f"{ep_id}_aligned.json").exists():
                     episodes[ep_id] = "pending"
                     healed.append(f"{ep_id}:aligned→pending")

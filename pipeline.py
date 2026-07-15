@@ -1318,10 +1318,6 @@ def _run_post_review_only(cfg: dict) -> None:
     # Stage 6 — Creatives
     pipeline._phase_creatives()
 
-    # FinOps
-    from src.intelligence.translation_matrix import TranslationMatrix
-    from src.intelligence.cost_auditor import CostAuditor as CA
-    matrix_tmp = TranslationMatrix.__new__(TranslationMatrix)
     logger.info("Post-review stages complete.  Outputs → %s", output_dir)
     _generate_dashboard()
 
