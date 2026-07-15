@@ -1,6 +1,6 @@
 # cc_script_manager — 短剧字幕自动化流水线
 
-> **80集全量测试通过（胜爱情战争）** · **英文剧集支持（Dollar Baby 54集，¥0.45）** · **宝宝心思我知道（79集）翻译+素材完成** · **Mecha Mechanic（135集）& The Riverside Chef S1（88集）运行中** · 双轨多语言翻译矩阵（EN / FR / ES）· 英文剧 FR/ES 并发翻译（`_step2b_only()`）· OCR FFmpeg 管道抽帧（~96% 帧减少）· 付费墙战略报告 · Stage 6 广告素材自动生产（含悬念结尾精准剪切）· 检查点断点续传 · DeepSeek + Claude API 驱动
+> **80集全量测试通过（胜爱情战争）** · **英文剧集支持（Dollar Baby 54集，¥0.45）** · **宝宝心思我知道（79集）翻译+素材完成** · **Mecha Mechanic（135集）翻译完成（¥22.71）** · 双轨多语言翻译矩阵（EN / FR / ES）· **Stage 4.5 Auto-Term Anchoring**（人名/术语/题材一次性自动锚定）· **中文剧集运营审核暂停工作流**（`--post-review`）· 英文剧 FR/ES 并发翻译（`_step2b_only()`）· OCR FFmpeg 管道抽帧（~96% 帧减少）· 付费墙战略报告 · Stage 6 广告素材自动生产（含悬念结尾精准剪切）· 检查点断点续传 · DeepSeek + Claude API 驱动
 
 ---
 
@@ -52,6 +52,24 @@
      └────────────────────────────────────────────────────┘
            │  输出: data/output/<show_name>/<lang>/{ep}.srt
            │         （lang = "cn" 中文剧 / "en" 英文剧）
+           │
+           │  ⏸  [source_language="zh"] CN 字幕审核暂停
+           │      写入 REVIEW_PENDING 标记 → 提示运营人员检查/添加人名条
+           │      运营完成后删除 REVIEW_PENDING → python pipeline.py "<drama>" --post-review
+           │      [source_language="en"] 直接继续，无需暂停
+           │
+     Stage 4.5 ─ Auto-Term Anchoring (--post-review 触发 / EN 剧连续执行)
+           │
+     ┌─────┴─────────────────────────────────────────────┐
+     │  src/intelligence/                                 │
+     │    term_anchoring.py — 一次性 Claude 调用          │
+     │      · 采样前 3 集 CN SRT → 推断人名英译 + 性别代词  │
+     │      · 识别领域专业术语（军旅/职场/仙侠等）          │
+     │      · 生成 genre_description 供 EN 精修提示词注入   │
+     │  config/prompts/                                   │
+     │    anchor_terms.j2                                 │
+     └────────────────────────────────────────────────────┘
+           │  输出: data/meta/<show_name>/en_terms.json（幂等，已存在则跳过）
            │
      Stage 5 ─ Intelligence (可选，由 intelligence.drama_analysis.enabled 开关控制)
            │
@@ -123,7 +141,8 @@
 | 智能 | `rhythm_analyzer.py` | 两阶段 MapReduce 剧情因果链拆分，并行 Map + 单次 Reduce |
 | 智能 | `cost_auditor.py` | FinOps 核算：按模块分类 token 用量，输出 CNY 成本表；`cfg_key` 参数支持 DeepSeek / Claude 独立计费 |
 | 智能 | `paywall_strategist.py` | 读取 drama_structure_graph.json，以 JSON 中 first_pinch / second_pinch 为确定卡点，Claude 撰写深度运营分析 + 营销素材剪辑建议（8-10 条）|
-| 翻译 | `translation_matrix.py` | 双轨多语言翻译矩阵：DeepSeek 骨架 + Claude 润色 + 多语言并发（EN / FR / ES 默认开启） |
+| 翻译 | `term_anchoring.py` | Stage 4.5：一次性 Claude 调用，从 CN SRT 采样推断人名英译/性别/代词/专业术语/题材描述，输出 `en_terms.json`；幂等，已覆盖所有人物时自动跳过 |
+| 翻译 | `translation_matrix.py` | 双轨多语言翻译矩阵：DeepSeek 骨架 + Claude 润色 + 多语言并发（EN / FR / ES 默认开启）；从 en_terms.json 注入代词映射 + 题材上下文 |
 | 素材 | `scripts/extract_clips.py` | 读 drama_structure_graph.json 的锚点列表，调用 ffmpeg 裁剪每个锚点为独立片段；idempotent |
 | 素材 | `scripts/plan_clips.py` | DeepSeek LLM 规划 ~3 分钟延伸方案；Layer 3 从场景数据替换尾帧时间码；Layer 4 SRT 行扫描兜底悬念剪切；输出 clip_plans.json |
 | 素材 | `scripts/process_creatives.py` | 读 clip_plans.json，帧精确分段提取（nvenc/libx264）+ stream-copy concat；同步生成跨集合并英文 SRT（时间轴对齐到拼接视频），输出 ext_*.mp4 + ext_*.srt；skip-if-exists 保护 |
@@ -1061,6 +1080,7 @@ with self._ledger_lock:
 | `Drama_Analysis` | RhythmAnalyzer Map 阶段 |
 | `Drama_Blueprint` | RhythmAnalyzer Reduce 阶段 |
 | `ROI_Auto_Heal` | ProjectInitializer（换新剧 ROI 推断） |
+| `Term_Anchoring` | TermAnchoring（Stage 4.5，一次性 Claude 调用；幂等，已有结果时不计费） |
 
 #### 终端输出样例
 
@@ -1096,7 +1116,7 @@ pricing:
 |------|------|---------|
 | `data/output/<show>/cost_report_deepseek.json` | 主流水线 Stage 3-5（DeepSeek） | `deepseek-chat` |
 | `data/output/<show>/cost_report_deepseek_translation.json` | 翻译矩阵 DeepSeek 骨架（Stage 7） | `deepseek-chat` |
-| `data/output/<show>/cost_report_claude.json` | 翻译矩阵 Claude 润色（EN refine） | `anthropic/claude-sonnet-4-5` |
+| `data/output/<show>/cost_report_claude.json` | 翻译矩阵 Claude 润色（EN refine）+ Stage 4.5 术语锚定 | `anthropic/claude-sonnet-4-5` |
 | `data/output/<show>/cost_report_paywall.json` | `--paywall-report` 付费墙报告 | `anthropic/claude-sonnet-4-5` |
 
 **历史追加（cost_history.jsonl）：** 每次运行结束时，`CostAuditor._append_history()` 将本次成本记录追加至 `data/output/<show>/cost_history.jsonl`（JSONL 格式，一行一记录，永不覆盖）。重新运行流水线时，即使本次无新 API 调用（全量命中缓存），历史文件也保留所有历史数据，主报告 JSON 的"空运行覆盖保护"防止以 0 覆盖真实费用记录。
@@ -1133,16 +1153,30 @@ pricing:
 ### 5.1　架构：三步双轨并发
 
 ```
+[Stage 4.5 en_terms.json] ← 一次性 Claude 调用（已存在时跳过）
+   ├─ characters: {zh_name: {en_name, gender, pronoun}}
+   ├─ glossary:   {zh_term: en_equivalent}
+   └─ genre_description: "Chinese military sci-fi short drama..."
+
 精修中文 SRT (data/output/<show_name>/cn/{ep}.srt)         ← source_language="zh"
+  （运营人员可在 cn/ 目录添加人名条 {头衔 姓名}：台词 后由 --post-review 触发）
   或
 精修英文 SRT (data/output/<show_name>/en/{ep}.srt)         ← source_language="en"
          │
    Step 1 — DeepSeek   ZH → EN 骨架（faithful，保留所有剧情信息）
+         │  · char_map（3级优先：override > en_terms > meta.json canonical_en）
+         │  · glossary（en_terms 为底，genre 文件覆盖冲突项）
+         │  · pronoun_map（从 en_terms.characters 构建，性别一致性约束）
+         │  · 人名条转换：{头衔 姓名}：台词 → [English Title - Name]: dialogue
          │  ★ source_language="en" 时跳过此步（EN 内容直接作骨架）
          │
          ├─ Track A (并发) — Claude    EN 骨架 → EN 润色（US English，移动端观感）
+         │  · genre_context 注入（从 en_terms.genre_description，非硬编码）
+         │  · pronoun_map 注入（he/she/they 一致性）
+         │  · 人名条保留：[Title - Name]: 前缀原样保留，仅润色后续台词
          │  ★ source_language="en" 时跳过（内容已是英文，无需润色）
          └─ Track B (并发) — DeepSeek  EN 骨架 → fr / es / …（小语种，每种一线程）
+         │  · pronoun_map 注入；人名条保留英文格式
          │  ★ source_language="en" 时仍正常执行（_step2b_only()）
          │                             （默认配置：fr + es；在 settings.yaml target_languages 扩展）
          │
@@ -1166,7 +1200,21 @@ pricing:
 - **小语种从骨架翻译，非从润色翻译**：骨架保留原文信息最完整，润色版已做美式英语适配，不宜作为泰语/越南语等的二次源。
 - **缓存双重校验**：命中需同时满足 `target_languages` 覆盖 + `segment_count` 与当前精修 SRT 匹配；任一不符则自动重跑。
 
-### 5.2　人名西化（一次性 LLM 调用）
+### 5.2　人名映射优先级（三级覆盖）
+
+`TranslationMatrix._build_char_map()` 按以下优先级为每个中文人名查找英文映射：
+
+| 优先级 | 来源 | 说明 |
+|--------|------|------|
+| **P1（最高）** | `data/meta/<show>/char_name_en_override.json` | 人工校准或 `_ensure_name_override()` 生成的西化名；一旦写入永不被覆盖 |
+| **P2** | `data/meta/<show>/en_terms.json` → `characters.<zh>.en_name` | Stage 4.5 Auto-Term Anchoring 生成；按剧情自动推断 |
+| **P3（最低）** | `data/meta/meta.json` → `canonical_en` | MapReduce 阶段产出；可能为 `null`（触发拼音回退） |
+
+**推荐工作流：** 初次运行让 Stage 4.5 先写 P2 映射 → 运营确认后如有修正写入 P1 override → 后续运行无需重跑。
+
+---
+
+### 5.2a　人名西化（一次性 LLM 调用）
 
 **文件：** `_ensure_name_override()` in `translation_matrix.py`  
 **缓存：** `data/meta/char_name_en_override.json`
@@ -1350,6 +1398,79 @@ def _clip_overlapping_ends(srt_text: str) -> str:
 
 **效果：** ep01 由 9 处重叠 → 0；所有 SRT 写出前自动修剪，无需清缓存重跑 LLM。
 
+#### 防御 14　[corrupted] 占位符过滤
+
+**文件：** `src/execution/episode_refiner.py` — `_filter_corrupted_placeholders()`
+
+**问题：** OCR 或 LLM 偶尔输出 `[corrupted]` / `[corrupted - illegible]` 等占位符条目，这些条目既无文字内容又无法翻译，若保留会在英文 SRT 中出现空槽或 `[corrupted]` 直译。
+
+**修复：** 后处理链最前端增加一步，正则匹配并删除纯占位符条目，删后重新连续编号：
+
+```python
+_CORRUPTED_RE = re.compile(r"^\[corrupted[^\]]*\]$", re.IGNORECASE)
+
+def _filter_corrupted_placeholders(srt_text: str) -> str:
+    # 删除 text 字段匹配 [corrupted...] 的条目，余下条目重新编号
+```
+
+**应用位置：** 所有 3 条 SRT 写路径的最外层首步：
+`_clip_overlapping_ends(_split_long_segments(_merge_short_fragments(_merge_artifact_fragments(_filter_corrupted_placeholders(raw)))))`
+
+#### 防御 15　Stage 4.5 自动术语锚定
+
+**文件：** `src/intelligence/term_anchoring.py`
+
+**问题：** 多集翻译中，同一角色在不同集的英文名可能漂移（如 `麒麟` 在不同集出现 `Qilin` / `Kirin` / `Kylin`），同一性别的角色代词可能混用（`she` / `he`），剧目题材（军旅/职场/仙侠）影响语气润色但硬编码在 prompt 中无法按剧自动切换。
+
+**修复：** `TermAnchoring.build()` 在翻译前执行一次 Claude 调用：
+
+```python
+# 采样前 3 集 CN SRT → 最多 120 行对话
+# Claude 输出 en_terms.json：
+{
+  "genre_description": "Chinese military sci-fi short drama...",
+  "characters": {
+    "王天威": {"en_name": "Wang Tianwei", "gender": "female", "pronoun": "she"},
+    "黄燕":  {"en_name": "Huang Yan",    "gender": "male",   "pronoun": "he"}
+  },
+  "glossary": {
+    "联邦第一军校": "Federal First Military Academy",
+    "末世":        "Apocalypse"
+  }
+}
+```
+
+**幂等机制：** 文件已存在且覆盖 meta.json 中所有人物时自动跳过（不重新调用 LLM）。
+
+**下游注入点：**
+
+| 注入目标 | 效果 |
+|---------|------|
+| `translate_en_skeleton.j2` | `pronoun_map_json` 约束骨架翻译性别代词 |
+| `refine_en_claude.j2` | `pronoun_map_json` + `genre_context` 约束润色语气 |
+| `translate_minor_lang.j2` | `pronoun_map_json` 约束小语种性别代词 |
+| `translation_matrix._build_char_map()` | en_terms.characters 作为 P2 人名来源 |
+| `translation_matrix._load_glossary()` | en_terms.glossary 作为底层词表 |
+
+#### 防御 16　人名条格式转换
+
+**问题：** 运营人员在 CN SRT 中添加的人名条格式为 `{头衔 姓名}：台词`（中文大括号 + 全角冒号），但 EN / FR / ES 字幕需要显示为 `[English Title - Name]: dialogue`（英文方括号格式）。
+
+**修复：** 在 `translate_en_skeleton.j2` prompt 中明确 NAME CARD FORMAT 规则：
+
+```
+- 检测 {头衔 姓名}：开头的条目（中文全角冒号）
+- 转换为 [English Title - Name]: 格式（英译头衔，人名用 char_map 查找）
+- 例：{海城首富 霍建华}：你好  →  [City's Richest - Huo Jianhua]: Hello
+```
+
+`refine_en_claude.j2` 和 `translate_minor_lang.j2` 中追加 NAME CARD PRESERVATION 规则：
+
+```
+- 识别 [Title - Name]: 前缀，原样保留
+- 只润色/翻译其后的台词文字
+```
+
 #### 覆盖率报告
 
 `run_all()` 结束时自动调用 `_log_coverage_report()`，扫描所有集数翻译缓存：
@@ -1364,20 +1485,54 @@ EN coverage gaps in 2/80 episode(s)  (3/3420 segments empty):
 ### 5.4　CLI 命令
 
 ```powershell
-# 仅运行翻译（ASR/OCR/对齐/精修全部走缓存）
-python pipeline.py --translate-only
-
 # API Key 注入（每次 Shell 会话执行一次）
 $env:DEEPSEEK_API_KEY    = "your_deepseek_key"
 $env:OPENROUTER_API_KEY  = "your_openrouter_key"   # Claude 通过 OpenRouter 调用
+
+# 仅运行翻译（ASR/OCR/对齐/精修全部走缓存）
+python pipeline.py "<drama_name>" --translate-only
+
+# 中文剧审核完成后恢复（Stage 4.5 → 翻译 → 素材）
+python pipeline.py "<drama_name>" --post-review
+
+# 批量：data/raw/ 下所有剧集跑 Stage 1-4（zh 剧暂停等审核，en 剧跑完整流程）
+python pipeline.py --all
+
+# 批量审核完成后恢复（处理所有已通过审核、未开始翻译的剧集）
+python pipeline.py --all --post-review
+```
+
+**CN 审核工作流（source_language="zh" 剧集）：**
+
+```
+1. python pipeline.py "<drama_name>"
+   → 完成 Stage 1-4，输出 data/output/<show>/cn/{ep}.srt
+   → 写入 data/meta/<show>/REVIEW_PENDING
+   → 打印暂停提示（文件夹路径 + 人名条格式说明）
+
+2. 运营人员在 data/output/<show>/cn/ 下检查/修改字幕
+   · 可在台词前添加人名条：{头衔 姓名}：台词
+   · 例：{海城首富 霍建华}：你今天要去哪里
+   · 无需修改也没关系，保持原文件即可
+
+3. 运营人员删除（或不操作，脚本会自动处理）REVIEW_PENDING 文件
+   - 实际上运营只需替换文件，REVIEW_PENDING 由 --post-review 清除
+
+4. python pipeline.py "<drama_name>" --post-review
+   → 清除 REVIEW_PENDING → Stage 4.5 → 翻译 → 素材生产
+   → 人名条 {头衔 姓名}：→ [English Title - Name]: 格式（骨架翻译自动转换）
 ```
 
 **输出目录结构：**
 ```
 data/output/<show_name>/
+  cn/
+    01.srt     ← 精修中文字幕（可含人名条，运营审核基准）
+    02.srt
+    ...
   translations/
     en/
-      01_en.srt    ← 英文字幕（单行，Claude 润色）
+      01_en.srt    ← 英文字幕（单行，Claude 润色；人名条格式 [Title - Name]:）
       02_en.srt
       ...
     fr/
@@ -1387,9 +1542,11 @@ data/output/<show_name>/
       01_es.srt
       ...
 data/meta/<show_name>/
-  char_name_en_override.json   ← 人名西化映射，可手动修改后删缓存重跑
+  en_terms.json              ← Stage 4.5 生成：人名英译 + 性别 + 术语 + 题材描述
+  char_name_en_override.json ← 人名西化映射（P1 优先级），可手动修改后删缓存重跑
+  REVIEW_PENDING             ← 运营审核状态标记（存在=待审核；--post-review 清除）
 data/cache/<show_name>/translation/
-  01_translation.json          ← 骨架 + 润色 + 小语种 完整翻译缓存
+  01_translation.json        ← 骨架 + 润色 + 小语种 完整翻译缓存
 ```
 
 > **source_language="en" 行为：** 跳过 Step 1（ZH→EN）和 Track A（Claude 润色）；直接取 EN 主字幕作骨架，并发执行 Track B（FR/ES 等小语种，`_step2b_only()`）。仅当 `target_languages: []`（空列表）时才完全跳过整个 Stage，不发任何 LLM 请求。
