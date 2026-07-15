@@ -32,12 +32,15 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 
 # Calibration constants
-_SAMPLE_EPISODES    = 5          # max episodes to sample
-_SAMPLE_TIMESTAMPS  = [10, 30, 60, 120, 180, 300]   # seconds into video
+_SAMPLE_EPISODES    = 8          # max episodes to sample (increased for micro-dramas)
+# Proportional sample points (fraction of episode duration).
+# Replaces fixed-second timestamps so micro-dramas (≤2 min) get valid frames.
+_SAMPLE_RATIOS      = [0.15, 0.30, 0.45, 0.60, 0.75, 0.90]
+_SAMPLE_TIMESTAMPS  = [10, 30, 60, 120, 180, 300]   # fallback when duration unknown
 _MIN_WIDTH_RATIO    = 0.25       # subtitle boxes span ≥25% of frame width
 _MIN_Y_CENTER       = 0.45       # subtitle centre must be in lower 55%
 _MIN_CONFIDENCE     = 0.50       # PaddleOCR confidence floor
-_MIN_BOXES_REQUIRED = 5          # abort if fewer than this many boxes detected
+_MIN_BOXES_REQUIRED = 3          # abort if fewer than this many boxes detected
 _ROI_MARGIN         = 0.04       # padding added around the detected y-band
 _VERIFY_TIMESTAMPS  = [30, 60, 120, 180]   # timestamps tried during spot-check
 
@@ -152,8 +155,8 @@ class ProjectInitializer:
 
         sample_videos = videos[:_SAMPLE_EPISODES]
         logger.info(
-            "[ROI Calibration] Scanning %d episode(s) × %d timestamp(s) …",
-            len(sample_videos), len(_SAMPLE_TIMESTAMPS),
+            "[ROI Calibration] Scanning %d episode(s) × %d sample points …",
+            len(sample_videos), len(_SAMPLE_RATIOS),
         )
 
         # Probe frame dimensions from the first video
@@ -163,7 +166,16 @@ class ProjectInitializer:
         y_bots: list[float] = []
 
         for video in sample_videos:
-            for ts in _SAMPLE_TIMESTAMPS:
+            dur = self._probe_duration(video)
+            if dur > 0:
+                # Proportional timestamps — works for both micro-dramas (≤2 min)
+                # and full-length episodes; leave ≥2 s buffer before end.
+                timestamps = [
+                    dur * r for r in _SAMPLE_RATIOS if dur * r < dur - 2.0
+                ]
+            else:
+                timestamps = _SAMPLE_TIMESTAMPS  # fallback: unknown duration
+            for ts in timestamps:
                 frame = self._extract_frame(video, ts, frame_w, frame_h)
                 if frame is None:
                     continue
@@ -271,6 +283,19 @@ class ProjectInitializer:
     # ------------------------------------------------------------------ #
     #  Frame extraction helpers                                            #
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _probe_duration(video: Path) -> float:
+        """Return video duration in seconds via ffprobe (0.0 on failure)."""
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(video)],
+            capture_output=True, text=True,
+        )
+        try:
+            return float(r.stdout.strip())
+        except ValueError:
+            return 0.0
 
     @staticmethod
     def _probe_dimensions(video: Path) -> tuple[int, int]:
